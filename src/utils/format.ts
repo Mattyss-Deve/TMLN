@@ -1,7 +1,31 @@
-import type { TimelineSchemaFormat } from '../types/timeline';
+import type { TimelineSchemaFormat, UnitSystem } from '../types/timeline';
 
-export function formatDistance(meters: number): string {
-  if (!Number.isFinite(meters) || meters <= 0) return '0 m';
+const METERS_PER_MILE = 1609.344;
+const METERS_PER_FOOT = 0.3048;
+const KMH_TO_MPH = 0.621371;
+
+export function formatDistance(
+  meters: number,
+  units: UnitSystem = 'METRIC'
+): string {
+  if (!Number.isFinite(meters) || meters <= 0) {
+    return units === 'IMPERIAL' ? '0 ft' : '0 m';
+  }
+
+  if (units === 'IMPERIAL') {
+    const miles = meters / METERS_PER_MILE;
+    if (miles < 0.2) {
+      return `${Math.round(meters / METERS_PER_FOOT).toLocaleString()} ft`;
+    }
+    if (miles < 10) {
+      return `${miles.toFixed(2)} mi`;
+    }
+    if (miles < 100) {
+      return `${miles.toFixed(1)} mi`;
+    }
+    return `${Math.round(miles).toLocaleString()} mi`;
+  }
+
   if (meters < 1000) {
     return `${Math.round(meters)} m`;
   }
@@ -104,10 +128,26 @@ export function formatYearMonthLabel(yearMonth: string): string {
   });
 }
 
-export function formatSpeed(kmh: number): string {
+export function formatSpeed(
+  kmh: number,
+  units: UnitSystem = 'METRIC'
+): string {
   if (!Number.isFinite(kmh) || kmh < 0.5) return '0';
-  if (kmh < 10) return kmh.toFixed(1);
-  return String(Math.round(kmh));
+  const value = units === 'IMPERIAL' ? kmh * KMH_TO_MPH : kmh;
+  if (value < 0.5) return '0';
+  if (value < 10) return value.toFixed(1);
+  return String(Math.round(value));
+}
+
+export function getSpeedUnitLabel(units: UnitSystem = 'METRIC'): string {
+  return units === 'IMPERIAL' ? 'mph' : 'km/h';
+}
+
+export function formatHours(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0.0h';
+  const hours = ms / 3_600_000;
+  if (hours < 10) return `${hours.toFixed(1)}h`;
+  return `${Math.round(hours).toLocaleString()}h`;
 }
 
 export function formatSchemaName(schema: TimelineSchemaFormat): string {

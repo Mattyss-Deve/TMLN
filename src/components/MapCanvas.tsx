@@ -2,17 +2,81 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import type { AnimationController } from '../engine/animationController';
 import type {
+  AppSettings,
   CameraMode,
+  MapStyleId,
   PlaceVisit,
   TelemetryFrame,
   TransportMode,
   Trip,
 } from '../types/timeline';
 import { formatDuration } from '../utils/format';
+import { resolveVisitDisplayName } from '../utils/geocoder';
 import { clamp, lerp, lerpAngle, MODE_COLORS } from '../utils/geo';
+import { ACCENT_THEMES } from '../utils/settings';
 
 const CARTO_DARK_STYLE =
   'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+
+const DAYLIGHT_3D_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
+
+const SATELLITE_HYBRID_STYLE: maplibregl.StyleSpecification = {
+  version: 8,
+  sources: {
+    'esri-world-imagery': {
+      type: 'raster',
+      tiles: [
+        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      ],
+      tileSize: 256,
+      maxzoom: 19,
+      attribution: 'Esri, Maxar, Earthstar Geographics',
+    },
+    'carto-voyager-labels': {
+      type: 'raster',
+      tiles: [
+        'https://basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}@2x.png',
+      ],
+      tileSize: 256,
+      maxzoom: 20,
+      attribution: '© CARTO, © OpenStreetMap contributors',
+    },
+  },
+  layers: [
+    {
+      id: 'esri-world-imagery-layer',
+      type: 'raster',
+      source: 'esri-world-imagery',
+    },
+    {
+      id: 'carto-voyager-labels-layer',
+      type: 'raster',
+      source: 'carto-voyager-labels',
+      paint: {
+        'raster-opacity': 0.88,
+      },
+    },
+  ],
+};
+
+const EMPTY_FC: GeoJSON.FeatureCollection = {
+  type: 'FeatureCollection',
+  features: [],
+};
+
+function getMapStyleSource(
+  styleId: MapStyleId
+): string | maplibregl.StyleSpecification {
+  switch (styleId) {
+    case 'SATELLITE':
+      return SATELLITE_HYBRID_STYLE;
+    case 'DAYLIGHT':
+      return DAYLIGHT_3D_STYLE;
+    case 'DARK':
+    default:
+      return CARTO_DARK_STYLE;
+  }
+}
 
 interface MapCanvasProps {
   controller: AnimationController;
@@ -21,6 +85,11 @@ interface MapCanvasProps {
   recenterNonce: number;
   onCameraModeChange: (mode: CameraMode) => void;
   sidebarOpen: boolean;
+  settings: AppSettings;
+  showHeatmap: boolean;
+  heatmapGeoJson: GeoJSON.FeatureCollection | null;
+  nicknames: Record<string, string>;
+  geocodeCache: Record<string, string>;
   onMapError?: (message: string) => void;
 }
 
@@ -33,17 +102,27 @@ interface VisitMarkerHandle {
   labelEl: HTMLDivElement;
 }
 
-function getTargetZoomForFrame(frame: TelemetryFrame): number {
-  if (frame.mode === 'FLYING' || frame.speedKmh > 220) return 7.6;
-  if (frame.mode === 'TRANSIT' || frame.speedKmh > 95) return 11.8;
-  if (frame.mode === 'DRIVING' || frame.speedKmh > 28) return 13.4;
-  if (frame.mode === 'CYCLING' || frame.speedKmh > 7) return 14.8;
-  return 15.8;
+function getTargetZoomForFrame(frame: TelemetryFrame, isDrone = false): number {
+  let base: number;
+  if (frame.mode === 'FLYING' || frame.speedKmh > 220) base = 7.6;
+  else if (frame.mode === 'TRANSIT' || frame.speedKmh > 95) base = 11.8;
+  else if (frame.mode === 'DRIVING' || frame.speedKmh > 28) base = 13.4;
+  else if (frame.mode === 'CYCLING' || frame.speedKmh > 7) base = 14.8;
+  else base = 15.8;
+
+  return isDrone ? Math.min(18.2, base + 1.35) : base;
+}
+
+function getCameraPitchForMode(mode: CameraMode, enable3D: boolean): number {
+  if (mode === 'DRONE') return 65;
+  if (mode === 'CHASE') return enable3D ? 62 : 50;
+  if (mode === 'OVERVIEW') return enable3D ? 48 : 22;
+  return enable3D ? 62 : 0;
 }
 
 function buildGhostRouteGeoJson(trip: Trip | null): GeoJSON.FeatureCollection {
   if (!trip || trip.waypoints.length < 2) {
-    return { type: 'FeatureCollection', features: [] };
+    return EMPTY_FC;
   }
   return {
     type: 'FeatureCollection',
@@ -66,7 +145,7 @@ function buildActiveRouteGeoJson(
 ): GeoJSON.FeatureCollection {
   const waypoints = trip.waypoints;
   if (waypoints.length < 2) {
-    return { type: 'FeatureCollection', features: [] };
+    return EMPTY_FC;
   }
 
   const endIdx = clamp(frame.traveledWaypointIndex, 0, waypoints.length - 1);
@@ -101,7 +180,6 @@ function buildActiveRouteGeoJson(
     }
   }
 
-  // Append live interpolated tip position
   const tipCoord: [number, number] = [frame.lng, frame.lat];
   const lastCoord = runCoords[runCoords.length - 1];
   if (
@@ -135,13 +213,11 @@ function createPuckElement() {
   const root = document.createElement('div');
   root.className = 'relative w-20 h-20 pointer-events-none select-none';
 
-  // Pulsing sonar halo
   const sonar = document.createElement('div');
   sonar.className =
     'puck-sonar-ring absolute left-1/2 top-1/2 w-9 h-9 rounded-full';
   sonar.style.backgroundColor = 'rgba(34, 211, 238, 0.35)';
 
-  // Directional heading cone SVG (points straight up = 0 deg North)
   const ns = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(ns, 'svg');
   svg.setAttribute('viewBox', '0 0 80 80');
@@ -179,7 +255,6 @@ function createPuckElement() {
   cone.setAttribute('fill', 'url(#puck-cone-grad)');
   svg.appendChild(cone);
 
-  // Center luminous dot
   const dot = document.createElement('div');
   dot.className =
     'absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 rounded-full border-2 border-white transition-colors duration-150';
@@ -200,11 +275,17 @@ export function MapCanvas({
   recenterNonce,
   onCameraModeChange,
   sidebarOpen,
+  settings,
+  showHeatmap,
+  heatmapGeoJson,
+  nicknames,
+  geocodeCache,
   onMapError,
 }: MapCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
-  const mapLoadedRef = useRef(false);
+  const styleLoadedRef = useRef(false);
+  const appliedStyleIdRef = useRef<MapStyleId>(settings.mapStyle);
   const [mapReady, setMapReady] = useState(false);
 
   const tripRef = useRef<Trip | null>(trip);
@@ -215,6 +296,21 @@ export function MapCanvas({
 
   const sidebarOpenRef = useRef(sidebarOpen);
   sidebarOpenRef.current = sidebarOpen;
+
+  const settingsRef = useRef<AppSettings>(settings);
+  settingsRef.current = settings;
+
+  const showHeatmapRef = useRef<boolean>(showHeatmap);
+  showHeatmapRef.current = showHeatmap;
+
+  const heatmapGeoJsonRef = useRef<GeoJSON.FeatureCollection | null>(heatmapGeoJson);
+  heatmapGeoJsonRef.current = heatmapGeoJson;
+
+  const nicknamesRef = useRef<Record<string, string>>(nicknames);
+  nicknamesRef.current = nicknames;
+
+  const geocodeCacheRef = useRef<Record<string, string>>(geocodeCache);
+  geocodeCacheRef.current = geocodeCache;
 
   const onCameraModeChangeRef = useRef(onCameraModeChange);
   onCameraModeChangeRef.current = onCameraModeChange;
@@ -234,7 +330,6 @@ export function MapCanvas({
   const visitHandlesRef = useRef<VisitMarkerHandle[]>([]);
   const activeVisitIdRef = useRef<string | null>(null);
 
-  // Smooth camera tracking state for CHASE mode
   const chaseCameraRef = useRef<{
     zoom: number;
     bearing: number;
@@ -272,12 +367,11 @@ export function MapCanvas({
   const applyFrameToMap = useCallback(
     (frame: TelemetryFrame) => {
       const map = mapRef.current;
-      if (!map || !mapLoadedRef.current) return;
+      if (!map || !styleLoadedRef.current) return;
 
       const currentTrip = tripRef.current;
       if (!currentTrip || currentTrip.id !== frame.tripId) return;
 
-      // 1. Update active glowing GeoJSON route
       const activeSource = map.getSource('active-route') as
         | maplibregl.GeoJSONSource
         | undefined;
@@ -285,7 +379,6 @@ export function MapCanvas({
         activeSource.setData(buildActiveRouteGeoJson(currentTrip, frame));
       }
 
-      // 2. Update pulsing puck position, bearing, and mode color
       const puck = puckRef.current;
       if (puck) {
         puck.marker.setLngLat([frame.lng, frame.lat]);
@@ -302,20 +395,20 @@ export function MapCanvas({
         }
       }
 
-      // 3. Highlight active place visit marker
       frameVisitHighlight(frame.activeVisit ? frame.activeVisit.id : null);
 
-      // 4. Camera Chase tracking
-      if (cameraModeRef.current === 'CHASE') {
+      const mode = cameraModeRef.current;
+      if (mode === 'CHASE' || mode === 'DRONE') {
         const now = performance.now();
         if (now < chaseCameraRef.current.transitionUntilMs) {
           return;
         }
 
-        const targetZoom = getTargetZoomForFrame(frame);
+        const isDrone = mode === 'DRONE';
+        const targetZoom = getTargetZoomForFrame(frame, isDrone);
         const targetBearing =
           frame.mode === 'STILL' ? chaseCameraRef.current.bearing : frame.bearing;
-        const targetPitch = 50;
+        const targetPitch = getCameraPitchForMode(mode, settingsRef.current.enable3D);
 
         if (!chaseCameraRef.current.initialized) {
           chaseCameraRef.current.zoom = targetZoom;
@@ -326,7 +419,7 @@ export function MapCanvas({
           chaseCameraRef.current.zoom = lerp(
             chaseCameraRef.current.zoom,
             targetZoom,
-            0.055
+            isDrone ? 0.08 : 0.055
           );
           chaseCameraRef.current.pitch = lerp(
             chaseCameraRef.current.pitch,
@@ -337,13 +430,26 @@ export function MapCanvas({
             chaseCameraRef.current.bearing = lerpAngle(
               chaseCameraRef.current.bearing,
               targetBearing,
-              0.07
+              isDrone ? 0.12 : 0.07
             );
           }
         }
 
+        let centerLng = frame.lng;
+        let centerLat = frame.lat;
+
+        // Drone Chase slight forward look-ahead so the marker glides in the lower frame
+        if (isDrone && frame.mode !== 'STILL') {
+          const rad = (chaseCameraRef.current.bearing * Math.PI) / 180;
+          const aheadDeg = frame.mode === 'FLYING' ? 0.015 : 0.00035;
+          centerLat += Math.cos(rad) * aheadDeg;
+          centerLng +=
+            (Math.sin(rad) * aheadDeg) /
+            Math.max(0.25, Math.cos((frame.lat * Math.PI) / 180));
+        }
+
         map.jumpTo({
-          center: [frame.lng, frame.lat],
+          center: [centerLng, centerLat],
           zoom: chaseCameraRef.current.zoom,
           pitch: chaseCameraRef.current.pitch,
           bearing: chaseCameraRef.current.bearing,
@@ -353,29 +459,276 @@ export function MapCanvas({
     [frameVisitHighlight]
   );
 
+  /**
+   * Re-attaches all custom ChronoMap sources & layers (3D terrain, 3D buildings,
+   * heatmap, ghost route, active glowing route) idempotently on every style.load.
+   */
+  const syncCustomSourcesAndLayers = useCallback(
+    (map: maplibregl.Map) => {
+      const curSettings = settingsRef.current;
+      const accent = ACCENT_THEMES[curSettings.accentTheme];
+
+      // 1. AWS Terrarium DEM source for 3D Terrain
+      if (!map.getSource('terrain-dem')) {
+        map.addSource('terrain-dem', {
+          type: 'raster-dem',
+          tiles: [
+            'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png',
+          ],
+          encoding: 'terrarium',
+          tileSize: 256,
+          maxzoom: 15,
+        });
+      }
+
+      // 2. OpenFreeMap Planet vector source for 3D extruded buildings
+      if (!map.getSource('openfreemap-3d')) {
+        map.addSource('openfreemap-3d', {
+          type: 'vector',
+          url: 'https://tiles.openfreemap.org/planet',
+        });
+      }
+
+      if (!map.getLayer('chronomap-3d-buildings')) {
+        const buildingColor =
+          curSettings.mapStyle === 'DAYLIGHT'
+            ? '#cbd5e1'
+            : curSettings.mapStyle === 'SATELLITE'
+              ? '#1e293b'
+              : '#162235';
+        map.addLayer({
+          id: 'chronomap-3d-buildings',
+          type: 'fill-extrusion',
+          source: 'openfreemap-3d',
+          'source-layer': 'building',
+          minzoom: 13,
+          layout: {
+            visibility: curSettings.enable3D ? 'visible' : 'none',
+          },
+          paint: {
+            'fill-extrusion-color': buildingColor,
+            'fill-extrusion-height': [
+              'coalesce',
+              ['get', 'render_height'],
+              ['get', 'height'],
+              12,
+            ],
+            'fill-extrusion-base': [
+              'coalesce',
+              ['get', 'render_min_height'],
+              ['get', 'min_height'],
+              0,
+            ],
+            'fill-extrusion-opacity':
+              curSettings.mapStyle === 'SATELLITE' ? 0.56 : 0.72,
+          },
+        });
+      }
+
+      // Apply 3D terrain
+      try {
+        map.setTerrain(
+          curSettings.enable3D
+            ? { source: 'terrain-dem', exaggeration: 1.35 }
+            : null
+        );
+      } catch {
+        // Ignore terrain errors if style is mid-transition
+      }
+
+      // 3. All-Time Heatmap source & layers (route ribbons + thermal point density)
+      if (!map.getSource('alltime-heatmap')) {
+        map.addSource('alltime-heatmap', {
+          type: 'geojson',
+          data: heatmapGeoJsonRef.current ?? EMPTY_FC,
+        });
+      }
+
+      if (!map.getLayer('alltime-heatmap-routes')) {
+        map.addLayer({
+          id: 'alltime-heatmap-routes',
+          type: 'line',
+          source: 'alltime-heatmap',
+          filter: ['==', ['get', 'kind'], 'route'],
+          layout: {
+            visibility: showHeatmapRef.current ? 'visible' : 'none',
+            'line-cap': 'round',
+            'line-join': 'round',
+          },
+          paint: {
+            'line-color': accent.primary,
+            'line-width': 2.2,
+            'line-opacity': 0.28,
+          },
+        });
+      }
+
+      if (!map.getLayer('alltime-heatmap-density')) {
+        map.addLayer({
+          id: 'alltime-heatmap-density',
+          type: 'heatmap',
+          source: 'alltime-heatmap',
+          filter: ['==', ['get', 'kind'], 'heat'],
+          layout: {
+            visibility: showHeatmapRef.current ? 'visible' : 'none',
+          },
+          paint: {
+            'heatmap-weight': ['coalesce', ['get', 'weight'], 0.8],
+            'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 4, 0.8, 14, 2.2],
+            'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 4, 10, 14, 26],
+            'heatmap-opacity': 0.72,
+            'heatmap-color': [
+              'interpolate',
+              ['linear'],
+              ['heatmap-density'],
+              0,
+              'rgba(0,0,0,0)',
+              0.2,
+              'rgba(34,211,238,0.45)',
+              0.45,
+              'rgba(52,211,153,0.68)',
+              0.7,
+              'rgba(251,191,36,0.82)',
+              1,
+              'rgba(244,63,94,0.95)',
+            ],
+          },
+        });
+      }
+
+      // 4. Ghost Route source & layer
+      if (!map.getSource('ghost-route')) {
+        map.addSource('ghost-route', {
+          type: 'geojson',
+          data: buildGhostRouteGeoJson(tripRef.current),
+        });
+      }
+
+      if (!map.getLayer('ghost-route-line')) {
+        map.addLayer({
+          id: 'ghost-route-line',
+          type: 'line',
+          source: 'ghost-route',
+          layout: {
+            'line-cap': 'round',
+            'line-join': 'round',
+          },
+          paint: {
+            'line-color': curSettings.mapStyle === 'DAYLIGHT' ? '#475569' : '#94a3b8',
+            'line-width': Math.max(2, curSettings.routeWidth * 0.75),
+            'line-opacity': curSettings.mapStyle === 'SATELLITE' ? 0.38 : 0.25,
+          },
+        });
+      }
+
+      // 5. Active Glowing Route source & layers
+      if (!map.getSource('active-route')) {
+        map.addSource('active-route', {
+          type: 'geojson',
+          data: EMPTY_FC,
+        });
+      }
+
+      if (!map.getLayer('active-route-glow')) {
+        map.addLayer({
+          id: 'active-route-glow',
+          type: 'line',
+          source: 'active-route',
+          layout: {
+            'line-cap': 'round',
+            'line-join': 'round',
+          },
+          paint: {
+            'line-color':
+              curSettings.accentTheme === 'CYAN' ? ['get', 'color'] : accent.primary,
+            'line-width': curSettings.routeWidth * 3.1,
+            'line-blur': curSettings.routeGlow ? 7 : 0,
+            'line-opacity': curSettings.routeGlow ? 0.5 : 0,
+          },
+        });
+      }
+
+      if (!map.getLayer('active-route-core')) {
+        map.addLayer({
+          id: 'active-route-core',
+          type: 'line',
+          source: 'active-route',
+          layout: {
+            'line-cap': 'round',
+            'line-join': 'round',
+          },
+          paint: {
+            'line-color': ['get', 'color'],
+            'line-width': curSettings.routeWidth,
+            'line-opacity': 0.98,
+          },
+        });
+      }
+
+      // Ensure pulsing puck marker exists
+      if (!puckRef.current) {
+        const puckEl = createPuckElement();
+        const puckMarker = new maplibregl.Marker({
+          element: puckEl.root,
+          anchor: 'center',
+          pitchAlignment: 'map',
+          rotationAlignment: 'map',
+        })
+          .setLngLat([-122.42, 37.79])
+          .addTo(map);
+
+        if (!tripRef.current) {
+          puckEl.root.style.display = 'none';
+        }
+
+        puckRef.current = {
+          marker: puckMarker,
+          sonar: puckEl.sonar,
+          dot: puckEl.dot,
+          stopStart: puckEl.stopStart,
+          stopEnd: puckEl.stopEnd,
+        };
+      }
+
+      styleLoadedRef.current = true;
+      setMapReady(true);
+
+      const snap = controller.getSnapshot();
+      if (snap) {
+        applyFrameToMap(snap);
+      }
+    },
+    [applyFrameToMap, controller]
+  );
+
   // Initialize MapLibre GL once
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     let errorReported = false;
+    appliedStyleIdRef.current = settingsRef.current.mapStyle;
+
     const map = new maplibregl.Map({
       container,
-      style: CARTO_DARK_STYLE,
+      style: getMapStyleSource(settingsRef.current.mapStyle),
       center: [-122.42, 37.79],
       zoom: 2.3,
-      pitch: 0,
+      pitch: settingsRef.current.enable3D ? 62 : 0,
       bearing: 0,
       maxPitch: 75,
       attributionControl: false,
     });
 
-    map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right');
+    map.addControl(
+      new maplibregl.AttributionControl({ compact: true }),
+      'bottom-right'
+    );
     mapRef.current = map;
 
     const unlockToFreeMode = (ev: { originalEvent?: unknown }) => {
       if (!ev.originalEvent) return;
-      if (cameraModeRef.current === 'CHASE') {
+      if (cameraModeRef.current === 'CHASE' || cameraModeRef.current === 'DRONE') {
         onCameraModeChangeRef.current('FREE');
       }
     };
@@ -393,96 +746,12 @@ export function MapCanvas({
       }
     });
 
-    map.on('load', () => {
-      map.addSource('ghost-route', {
-        type: 'geojson',
-        data: buildGhostRouteGeoJson(tripRef.current),
-      });
-
-      map.addLayer({
-        id: 'ghost-route-line',
-        type: 'line',
-        source: 'ghost-route',
-        layout: {
-          'line-cap': 'round',
-          'line-join': 'round',
-        },
-        paint: {
-          'line-color': '#94a3b8',
-          'line-width': 3,
-          'line-opacity': 0.24,
-        },
-      });
-
-      map.addSource('active-route', {
-        type: 'geojson',
-        data: { type: 'FeatureCollection', features: [] },
-      });
-
-      map.addLayer({
-        id: 'active-route-glow',
-        type: 'line',
-        source: 'active-route',
-        layout: {
-          'line-cap': 'round',
-          'line-join': 'round',
-        },
-        paint: {
-          'line-color': ['get', 'color'],
-          'line-width': 12,
-          'line-blur': 7,
-          'line-opacity': 0.48,
-        },
-      });
-
-      map.addLayer({
-        id: 'active-route-core',
-        type: 'line',
-        source: 'active-route',
-        layout: {
-          'line-cap': 'round',
-          'line-join': 'round',
-        },
-        paint: {
-          'line-color': ['get', 'color'],
-          'line-width': 3.5,
-          'line-opacity': 0.98,
-        },
-      });
-
-      const puckEl = createPuckElement();
-      const puckMarker = new maplibregl.Marker({
-        element: puckEl.root,
-        anchor: 'center',
-        pitchAlignment: 'map',
-        rotationAlignment: 'map',
-      })
-        .setLngLat([-122.42, 37.79])
-        .addTo(map);
-
-      if (!tripRef.current) {
-        puckEl.root.style.display = 'none';
-      }
-
-      puckRef.current = {
-        marker: puckMarker,
-        sonar: puckEl.sonar,
-        dot: puckEl.dot,
-        stopStart: puckEl.stopStart,
-        stopEnd: puckEl.stopEnd,
-      };
-
-      mapLoadedRef.current = true;
-      setMapReady(true);
-
-      const snap = controller.getSnapshot();
-      if (snap) {
-        applyFrameToMap(snap);
-      }
+    map.on('style.load', () => {
+      syncCustomSourcesAndLayers(map);
     });
 
     return () => {
-      mapLoadedRef.current = false;
+      styleLoadedRef.current = false;
       setMapReady(false);
       for (const h of visitHandlesRef.current) {
         h.marker.remove();
@@ -493,7 +762,122 @@ export function MapCanvas({
       map.remove();
       mapRef.current = null;
     };
-  }, [applyFrameToMap, controller]);
+  }, [syncCustomSourcesAndLayers]);
+
+  // Switch Map Style seamlessly without losing routes or markers
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || appliedStyleIdRef.current === settings.mapStyle) return;
+    appliedStyleIdRef.current = settings.mapStyle;
+    styleLoadedRef.current = false;
+    try {
+      map.setTerrain(null);
+    } catch {
+      // Ignore if terrain wasn't active
+    }
+    map.setStyle(getMapStyleSource(settings.mapStyle));
+  }, [settings.mapStyle]);
+
+  // Toggle 3D Terrain & Extruded 3D Buildings dynamically
+  const prevEnable3DRef = useRef<boolean>(settings.enable3D);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleLoadedRef.current) return;
+
+    try {
+      map.setTerrain(
+        settings.enable3D ? { source: 'terrain-dem', exaggeration: 1.35 } : null
+      );
+    } catch {
+      // Ignore if terrain source not yet mounted
+    }
+
+    if (map.getLayer('chronomap-3d-buildings')) {
+      map.setLayoutProperty(
+        'chronomap-3d-buildings',
+        'visibility',
+        settings.enable3D ? 'visible' : 'none'
+      );
+    }
+
+    if (prevEnable3DRef.current !== settings.enable3D) {
+      prevEnable3DRef.current = settings.enable3D;
+      if (settings.enable3D) {
+        chaseCameraRef.current.transitionUntilMs = performance.now() + 720;
+        chaseCameraRef.current.pitch = 62;
+        map.easeTo({ pitch: 62, duration: 700 });
+      } else if (cameraModeRef.current !== 'DRONE') {
+        const nextPitch = getCameraPitchForMode(cameraModeRef.current, false);
+        chaseCameraRef.current.transitionUntilMs = performance.now() + 620;
+        chaseCameraRef.current.pitch = nextPitch;
+        map.easeTo({ pitch: nextPitch, duration: 600 });
+      }
+    }
+  }, [settings.enable3D, mapReady]);
+
+  // Update Route Thickness, Glow Intensity, and Accent Theme live
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleLoadedRef.current) return;
+    const accent = ACCENT_THEMES[settings.accentTheme];
+
+    if (map.getLayer('active-route-core')) {
+      map.setPaintProperty('active-route-core', 'line-width', settings.routeWidth);
+    }
+    if (map.getLayer('active-route-glow')) {
+      map.setPaintProperty(
+        'active-route-glow',
+        'line-width',
+        settings.routeWidth * 3.1
+      );
+      map.setPaintProperty(
+        'active-route-glow',
+        'line-blur',
+        settings.routeGlow ? 7 : 0
+      );
+      map.setPaintProperty(
+        'active-route-glow',
+        'line-opacity',
+        settings.routeGlow ? 0.5 : 0
+      );
+      map.setPaintProperty(
+        'active-route-glow',
+        'line-color',
+        settings.accentTheme === 'CYAN' ? ['get', 'color'] : accent.primary
+      );
+    }
+    if (map.getLayer('ghost-route-line')) {
+      map.setPaintProperty(
+        'ghost-route-line',
+        'line-width',
+        Math.max(2, settings.routeWidth * 0.75)
+      );
+    }
+    if (map.getLayer('alltime-heatmap-routes')) {
+      map.setPaintProperty('alltime-heatmap-routes', 'line-color', accent.primary);
+    }
+  }, [settings.routeWidth, settings.routeGlow, settings.accentTheme, mapReady]);
+
+  // Update All-Time Heatmap source & visibility dynamically
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleLoadedRef.current) return;
+
+    const heatSource = map.getSource('alltime-heatmap') as
+      | maplibregl.GeoJSONSource
+      | undefined;
+    if (heatSource && heatmapGeoJson) {
+      heatSource.setData(heatmapGeoJson);
+    }
+
+    const vis = showHeatmap ? 'visible' : 'none';
+    if (map.getLayer('alltime-heatmap-routes')) {
+      map.setLayoutProperty('alltime-heatmap-routes', 'visibility', vis);
+    }
+    if (map.getLayer('alltime-heatmap-density')) {
+      map.setLayoutProperty('alltime-heatmap-density', 'visibility', vis);
+    }
+  }, [showHeatmap, heatmapGeoJson, mapReady]);
 
   // Subscribe to 60fps animation frames
   useEffect(() => {
@@ -505,9 +889,8 @@ export function MapCanvas({
   // Sync ghost route, visit markers, and initial framing when Trip changes
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !mapLoadedRef.current || !mapReady) return;
+    if (!map || !styleLoadedRef.current || !mapReady) return;
 
-    // Clear previous visit markers
     for (const h of visitHandlesRef.current) {
       h.marker.remove();
     }
@@ -526,7 +909,7 @@ export function MapCanvas({
       | undefined;
     if (!trip) {
       if (activeSource) {
-        activeSource.setData({ type: 'FeatureCollection', features: [] });
+        activeSource.setData(EMPTY_FC);
       }
       if (puckRef.current) {
         puckRef.current.marker.getElement().style.display = 'none';
@@ -538,13 +921,18 @@ export function MapCanvas({
       puckRef.current.marker.getElement().style.display = 'block';
     }
 
-    // Create interactive Place Visit markers
     const newHandles: VisitMarkerHandle[] = trip.visits.map((visit) => {
+      const displayName = resolveVisitDisplayName(
+        visit,
+        nicknamesRef.current,
+        geocodeCacheRef.current
+      );
+
       const rootEl = document.createElement('button');
       rootEl.type = 'button';
       rootEl.className =
         'group relative flex items-center justify-center cursor-pointer focus:outline-none';
-      rootEl.title = `${visit.name} (${formatDuration(visit.dwellDurationMs)})`;
+      rootEl.title = `${displayName} (${formatDuration(visit.dwellDurationMs)})`;
 
       const ringEl = document.createElement('div');
       ringEl.className =
@@ -560,7 +948,7 @@ export function MapCanvas({
         'absolute bottom-5 left-1/2 px-2 py-1 rounded-lg bg-slate-950/90 border border-white/15 backdrop-blur-md text-[10px] font-medium text-slate-100 whitespace-nowrap shadow-xl pointer-events-none opacity-0 group-hover:opacity-100 transition-all duration-150';
       labelEl.style.transform = 'translate(-50%, 0)';
       labelEl.innerHTML = `<span class="font-semibold">${escapeHtml(
-        visit.name
+        displayName
       )}</span> <span class="text-emerald-300 ml-1">${escapeHtml(
         formatDuration(visit.dwellDurationMs)
       )}</span>`;
@@ -591,73 +979,96 @@ export function MapCanvas({
       applyFrameToMap(snap);
     }
 
-    // Frame the newly selected trip
     chaseCameraRef.current.initialized = false;
-    if (cameraModeRef.current === 'OVERVIEW') {
+    const mode = cameraModeRef.current;
+    if (mode === 'OVERVIEW') {
       map.fitBounds(trip.bounds, {
         padding: {
-          top: 90,
+          top: 100,
           bottom: 145,
           left: sidebarOpenRef.current ? 360 : 72,
           right: 310,
         },
-        pitch: 22,
+        pitch: getCameraPitchForMode('OVERVIEW', settingsRef.current.enable3D),
         bearing: 0,
         duration: 850,
         maxZoom: 15.5,
       });
-    } else if (cameraModeRef.current === 'CHASE' && snap) {
-      const targetZoom = getTargetZoomForFrame(snap);
+    } else if ((mode === 'CHASE' || mode === 'DRONE') && snap) {
+      const targetZoom = getTargetZoomForFrame(snap, mode === 'DRONE');
+      const targetPitch = getCameraPitchForMode(mode, settingsRef.current.enable3D);
       chaseCameraRef.current.zoom = targetZoom;
       chaseCameraRef.current.bearing = snap.bearing;
-      chaseCameraRef.current.pitch = 50;
+      chaseCameraRef.current.pitch = targetPitch;
       chaseCameraRef.current.initialized = true;
       chaseCameraRef.current.transitionUntilMs = performance.now() + 720;
 
       map.easeTo({
         center: [snap.lng, snap.lat],
         zoom: targetZoom,
-        pitch: 50,
+        pitch: targetPitch,
         bearing: snap.bearing,
         duration: 700,
       });
     }
   }, [trip, mapReady, controller, applyFrameToMap]);
 
-  // Handle explicit camera mode switching (UI buttons or keyboard shortcut)
+  // Live-update visit marker labels whenever geocoder resolves or user edits a nickname
+  useEffect(() => {
+    for (const handle of visitHandlesRef.current) {
+      const displayName = resolveVisitDisplayName(
+        handle.visit,
+        nicknames,
+        geocodeCache
+      );
+      handle.rootEl.title = `${displayName} (${formatDuration(
+        handle.visit.dwellDurationMs
+      )})`;
+      handle.labelEl.innerHTML = `<span class="font-semibold">${escapeHtml(
+        displayName
+      )}</span> <span class="text-emerald-300 ml-1">${escapeHtml(
+        formatDuration(handle.visit.dwellDurationMs)
+      )}</span>`;
+    }
+  }, [nicknames, geocodeCache]);
+
   const applyCameraModeTransition = useCallback(
     (nextMode: CameraMode) => {
       const map = mapRef.current;
       const currentTrip = tripRef.current;
-      if (!map || !mapLoadedRef.current || !currentTrip) return;
+      if (!map || !styleLoadedRef.current || !currentTrip) return;
 
       if (nextMode === 'OVERVIEW') {
         map.fitBounds(currentTrip.bounds, {
           padding: {
-            top: 90,
+            top: 100,
             bottom: 145,
             left: sidebarOpenRef.current ? 360 : 72,
             right: 310,
           },
-          pitch: 22,
+          pitch: getCameraPitchForMode('OVERVIEW', settingsRef.current.enable3D),
           bearing: 0,
           duration: 800,
           maxZoom: 15.5,
         });
-      } else if (nextMode === 'CHASE') {
+      } else if (nextMode === 'CHASE' || nextMode === 'DRONE') {
         const snap = controller.getSnapshot();
         if (snap) {
-          const targetZoom = getTargetZoomForFrame(snap);
+          const targetZoom = getTargetZoomForFrame(snap, nextMode === 'DRONE');
+          const targetPitch = getCameraPitchForMode(
+            nextMode,
+            settingsRef.current.enable3D
+          );
           chaseCameraRef.current.zoom = targetZoom;
           chaseCameraRef.current.bearing = snap.bearing;
-          chaseCameraRef.current.pitch = 50;
+          chaseCameraRef.current.pitch = targetPitch;
           chaseCameraRef.current.initialized = true;
           chaseCameraRef.current.transitionUntilMs = performance.now() + 620;
 
           map.easeTo({
             center: [snap.lng, snap.lat],
             zoom: targetZoom,
-            pitch: 50,
+            pitch: targetPitch,
             bearing: snap.bearing,
             duration: 600,
           });

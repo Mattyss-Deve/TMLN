@@ -9,10 +9,14 @@ A privacy-first, 100% client-side web application, installable PWA, and Capacito
   - **Classic Semantic Location History** (`timelineObjects`, `activitySegment`, `placeVisit`, E7 coordinates)
   - **Raw `Records.json`** (`locations` array with dwell clustering and activity inference)
   - Keeps 40MB+ parsed trips cached inside the Web Worker, transferring only lightweight day/journey summaries to the UI and loading full waypoints lazily on selection.
-- **60fps WebGL Map Engine (`src/engine/animationController.ts` & `src/components/MapCanvas.tsx`)**
-  - Smooth timestamp interpolation for coordinates, bearing, speed, and cumulative distance.
-  - Low-opacity ghost route, vibrant color-coded glowing active route per transport mode, pulsing directional puck, and interactive Place Visit markers.
-  - Three camera modes: **Chase** (`50°` pitch, speed-adaptive zoom, heading alignment), **Overview**, and **Free** with one-click **Re-center**.
+- **60fps Multi-Style & 3D WebGL Map Engine (`src/engine/animationController.ts` & `src/components/MapCanvas.tsx`)**
+  - Smooth Catmull-Rom spline interpolation for coordinates, bearing, speed, and cumulative distance.
+  - **3 Map Styles + 3D Mode:** Obsidian Dark (Carto), Satellite Hybrid (Esri World Imagery + Carto labels), and Daylight 3D (OpenFreeMap Liberty), plus toggleable AWS Terrarium 3D terrain (`exaggeration: 1.35`) and extruded OpenFreeMap 3D buildings (`fill-extrusion`).
+  - Four camera modes: **Chase**, **Drone Chase** (`65°` pitch), **Overview**, and **Free** with one-click **Re-center**.
+- **Reverse Geocoding, Custom Nicknames & All-Time Heatmap (`src/utils/geocoder.ts`, `src/components/StatsModal.tsx`, `src/components/SettingsModal.tsx`)**
+  - Rate-limited Nominatim reverse-geocoding (1 req/sec) and tap-to-rename visit nicknames persisted in `localStorage`.
+  - All-Time Stats & Heatmap modal with lifetime mode breakdowns (Subway, Tram, Bus, Train, Walk, Driving, Cycling, Flight), Top 10 visited places, and toggleable map heatmap overlay.
+  - Appearance & Settings drawer for Accent Theme, route thickness/glow, and Metric/Imperial units.
 - **Built-in Multi-Modal Sample Journey (`src/data/sampleJourney.ts`)**
   - Realistic Bay Area & Pacific Coast multi-day dataset covering walking, rail transit, driving, cycling, flight, and timed landmark visits.
 - **Obsidian Glassmorphic HUD & Android Safe-Area Support**
@@ -36,4 +40,4 @@ Open `http://127.0.0.1:5173` in a WebGL-capable browser.
 ## GitHub Actions & Android APK Builds
 
 - **GitHub Pages Web/PWA Deploy (`.github/workflows/deploy.yml`):** Automatically builds `dist/` and deploys to GitHub Pages on pushes to `main`/`master` (enable **Settings → Pages → Source: GitHub Actions**).
-- **Automated Android APK Build (`.github/workflows/build-apk.yml`):** Triggers on pushes to `main` or manual `workflow_dispatch`, runs `npm ci && npm run build && npx cap sync android`, compiles `android/app/build/outputs/apk/debug/app-debug.apk` with Java 21 (Temurin) + Gradle, and uploads it as the **`ChronoMap-APK`** workflow artifact.
+- **Automated Android APK Build (`.github/workflows/build-apk.yml`):** Triggers on pushes to `main` or manual `workflow_dispatch`, runs `npm ci && npm run build && npx cap sync android`, signs debug APKs consistently using `android/app/chronomap-debug.keystore` for seamless in-place updates, compiles `android/app/build/outputs/apk/debug/app-debug.apk` with Java 21 (Temurin) + Gradle, and uploads it as the **`ChronoMap-APK`** workflow artifact.

@@ -20,7 +20,7 @@ export interface WorkerParseResult {
 }
 
 interface PendingEntry {
-  kind: 'PARSE' | 'GET_TRIP';
+  kind: 'PARSE' | 'GET_TRIP' | 'GET_HEATMAP';
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
   onProgress?: (percent: number, stage: string) => void;
@@ -64,6 +64,8 @@ export class TimelineWorkerClient {
           } satisfies WorkerParseResult);
         } else if (msg.type === 'TRIP_DATA') {
           entry.resolve(msg.trip);
+        } else if (msg.type === 'HEATMAP_DATA') {
+          entry.resolve(msg.geojson);
         } else if (msg.type === 'ERROR') {
           entry.reject(new Error(msg.message));
         }
@@ -124,9 +126,17 @@ export class TimelineWorkerClient {
     );
   }
 
+  public getHeatmap(): Promise<GeoJSON.FeatureCollection> {
+    const id = this.nextRequestId++;
+    return this.dispatch<GeoJSON.FeatureCollection>(
+      { id, type: 'GET_HEATMAP' },
+      'GET_HEATMAP'
+    );
+  }
+
   private dispatch<T>(
     request: WorkerRequest,
-    kind: 'PARSE' | 'GET_TRIP',
+    kind: PendingEntry['kind'],
     onProgress?: (percent: number, stage: string) => void
   ): Promise<T> {
     const worker = this.ensureWorker();
@@ -219,6 +229,13 @@ export function useTimelineWorker() {
     []
   );
 
+  const getHeatmap = useCallback(async (): Promise<GeoJSON.FeatureCollection> => {
+    if (!clientRef.current) {
+      return { type: 'FeatureCollection', features: [] };
+    }
+    return clientRef.current.getHeatmap();
+  }, []);
+
   const cancel = useCallback(() => {
     clientRef.current?.cancel();
     setState({ isParsing: false, progress: 0, stage: '' });
@@ -229,6 +246,7 @@ export function useTimelineWorker() {
     parseFile,
     parseText,
     getTrip,
+    getHeatmap,
     cancel,
   };
 }

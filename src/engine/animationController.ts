@@ -6,7 +6,7 @@ import type {
   Trip,
   TripSegment,
 } from '../types/timeline';
-import { clamp, lerp, lerpAngle } from '../utils/geo';
+import { clamp, computeBearing, lerp, lerpAngle } from '../utils/geo';
 
 export const SPEED_PRESETS: SpeedPreset[] = [
   { kind: 'MULTIPLIER', multiplier: 1, label: '1x' },
@@ -21,6 +21,18 @@ export const SPEED_PRESETS: SpeedPreset[] = [
 export const DEFAULT_SPEED_PRESET: SpeedPreset = SPEED_PRESETS[5]; // Fit 30s
 
 export type FrameListener = (frame: TelemetryFrame) => void;
+
+function catmullRom(p0: number, p1: number, p2: number, p3: number, t: number): number {
+  const t2 = t * t;
+  const t3 = t2 * t;
+  return (
+    0.5 *
+    (2 * p1 +
+      (-p0 + p2) * t +
+      (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+      (-p0 + 3 * p1 - 3 * p2 + p3) * t3)
+  );
+}
 
 export class AnimationController {
   private trip: Trip | null = null;
@@ -257,7 +269,6 @@ export class AnimationController {
         return i;
       }
     }
-    // Fallback to nearest preceding segment
     for (let i = segments.length - 1; i >= 0; i--) {
       if (timeMs >= segments[i].startTimeMs) {
         return i;
@@ -296,7 +307,6 @@ export class AnimationController {
     const tMs = clamp(this.currentTimeMs, this.trip.startTimeMs, this.trip.endTimeMs);
     const progress = clamp((tMs - this.trip.startTimeMs) / totalDuration, 0, 1);
 
-    // Binary search for largest index i where waypoints[i].timestampMs <= tMs
     let lo = 0;
     let hi = waypoints.length - 1;
     while (lo < hi) {
@@ -316,14 +326,6 @@ export class AnimationController {
     const spanMs = w1.timestampMs - w0.timestampMs;
     const localT = spanMs > 0 ? clamp((tMs - w0.timestampMs) / spanMs, 0, 1) : 0;
 
-    const lat = lerp(w0.lat, w1.lat, localT);
-    const lng = lerp(w0.lng, w1.lng, localT);
-    const cumulativeDistanceM = lerp(
-      w0.cumulativeDistanceM,
-      w1.cumulativeDistanceM,
-      localT
-    );
-
     const activeSegmentIndex = this.findSegmentIndex(tMs);
     const activeSegment: TripSegment | null =
       activeSegmentIndex >= 0 ? this.trip.segments[activeSegmentIndex] : null;
@@ -334,8 +336,66 @@ export class AnimationController {
       ? 'STILL'
       : activeSegment?.mode ?? w0.mode;
 
-    const rawBearing =
+    let lat = lerp(w0.lat, w1.lat, localT);
+    let lng = lerp(w0.lng, w1.lng, localT);
+    let rawBearing =
       mode === 'STILL' ? w0.bearing : lerpAngle(w0.bearing, w1.bearing, localT);
+
+    // Smooth Catmull-Rom spline interpolation for continuous movement spans
+    const dLat = Math.abs(w1.lat - w0.lat);
+    const dLng = Math.abs(w1.lng - w0.lng);
+    if (
+      mode !== 'STILL' &&
+      w0.mode === w1.mode &&
+      spanMs > 0 &&
+      spanMs <= 5 * 60_000 &&
+      dLat < 0.15 &&
+      dLng < 0.15 &&
+      (dLat > 1e-6 || dLng > 1e-6)
+    ) {
+      const wPrev =
+        idx0 > 0 && waypoints[idx0 - 1].mode === w0.mode ? waypoints[idx0 - 1] : w0;
+      const wNext =
+        idx1 + 1 < waypoints.length && waypoints[idx1 + 1].mode === w1.mode
+          ? waypoints[idx1 + 1]
+          : w1;
+
+      const sLat = catmullRom(wPrev.lat, w0.lat, w1.lat, wNext.lat, localT);
+      const sLng = catmullRom(wPrev.lng, w0.lng, w1.lng, wNext.lng, localT);
+
+      const padLat = Math.max(0.0001, dLat * 0.25);
+      const padLng = Math.max(0.0001, dLng * 0.25);
+      lat = clamp(
+        sLat,
+        Math.min(w0.lat, w1.lat) - padLat,
+        Math.max(w0.lat, w1.lat) + padLat
+      );
+      lng = clamp(
+        sLng,
+        Math.min(w0.lng, w1.lng) - padLng,
+        Math.max(w0.lng, w1.lng) + padLng
+      );
+
+      // Smooth tangent bearing along spline curve
+      const eps = 0.03;
+      const tA = Math.max(0, localT - eps);
+      const tB = Math.min(1, localT + eps);
+      if (tB > tA) {
+        const latA = catmullRom(wPrev.lat, w0.lat, w1.lat, wNext.lat, tA);
+        const lngA = catmullRom(wPrev.lng, w0.lng, w1.lng, wNext.lng, tA);
+        const latB = catmullRom(wPrev.lat, w0.lat, w1.lat, wNext.lat, tB);
+        const lngB = catmullRom(wPrev.lng, w0.lng, w1.lng, wNext.lng, tB);
+        if (Math.abs(latB - latA) > 1e-7 || Math.abs(lngB - lngA) > 1e-7) {
+          rawBearing = computeBearing(latA, lngA, latB, lngB);
+        }
+      }
+    }
+
+    const cumulativeDistanceM = lerp(
+      w0.cumulativeDistanceM,
+      w1.cumulativeDistanceM,
+      localT
+    );
     const rawSpeedKmh =
       mode === 'STILL' ? 0 : lerp(w0.speedKmh, w1.speedKmh, localT);
 

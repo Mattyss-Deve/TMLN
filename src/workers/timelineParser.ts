@@ -1,9 +1,13 @@
 import type {
+  ActivitySubtype,
+  LifetimeStats,
+  ModeBreakdownItem,
   ParsedTimelineResult,
   PlaceVisit,
   TimelineSchemaFormat,
   TimelineSummaryIndex,
   TimelineViewMode,
+  TopLocationItem,
   TransportMode,
   Trip,
   TripSegment,
@@ -17,6 +21,7 @@ import {
   haversineMeters,
   isValidCoordinate,
   lerp,
+  MODE_COLORS,
 } from '../utils/geo';
 
 export class TimelineParseError extends Error {
@@ -60,6 +65,7 @@ interface ExtractedActivity {
   endTimeMs: number;
   localDateKey: string;
   mode: TransportMode;
+  subtype: ActivitySubtype;
   startCoord: { lat: number; lng: number } | null;
   endCoord: { lat: number; lng: number } | null;
   distanceMeters?: number;
@@ -68,6 +74,7 @@ interface ExtractedActivity {
 interface RawSegmentDraft {
   kind: 'ACTIVITY' | 'VISIT';
   mode: TransportMode;
+  subtype?: ActivitySubtype;
   startTimeMs: number;
   endTimeMs: number;
   localDateKey: string;
@@ -221,6 +228,77 @@ export function normalizeTransportMode(rawType: unknown): TransportMode | null {
   }
 
   return null;
+}
+
+export function classifyActivitySubtype(
+  rawType: unknown,
+  fallbackMode: TransportMode
+): ActivitySubtype {
+  if (typeof rawType === 'string') {
+    const upper = rawType.trim().toUpperCase();
+    if (upper.includes('SUBWAY') || upper.includes('METRO')) return 'SUBWAY';
+    if (upper.includes('TRAM') || upper.includes('LIGHT_RAIL')) return 'TRAM';
+    if (upper.includes('BUS')) return 'BUS';
+    if (
+      upper.includes('TRAIN') ||
+      upper.includes('RAIL') ||
+      upper.includes('FERRY') ||
+      upper.includes('TRANSIT') ||
+      upper.includes('CABLE_CAR') ||
+      upper.includes('GONDOLA')
+    ) {
+      return 'TRAIN';
+    }
+    if (
+      upper.includes('WALK') ||
+      upper.includes('FOOT') ||
+      upper.includes('RUN') ||
+      upper.includes('HIK')
+    ) {
+      return 'WALKING';
+    }
+    if (
+      upper.includes('CYCL') ||
+      upper.includes('BICYCL') ||
+      upper.includes('BIKE')
+    ) {
+      return 'CYCLING';
+    }
+    if (
+      upper.includes('FLY') ||
+      upper.includes('FLIGHT') ||
+      upper.includes('AIRPLANE') ||
+      upper.includes('PLANE')
+    ) {
+      return 'FLYING';
+    }
+    if (
+      upper.includes('DRIV') ||
+      upper.includes('VEHICLE') ||
+      upper.includes('CAR') ||
+      upper.includes('MOTORCYCL') ||
+      upper.includes('TAXI') ||
+      upper.includes('RIDESHAR') ||
+      upper.includes('AUTO')
+    ) {
+      return 'DRIVING';
+    }
+  }
+
+  switch (fallbackMode) {
+    case 'TRANSIT':
+      return 'TRAIN';
+    case 'WALKING':
+      return 'WALKING';
+    case 'CYCLING':
+      return 'CYCLING';
+    case 'FLYING':
+      return 'FLYING';
+    case 'DRIVING':
+      return 'DRIVING';
+    default:
+      return 'STILL';
+  }
 }
 
 function inferModeFromSpeed(speedKmh: number): TransportMode {
@@ -568,14 +646,16 @@ function parseOnDeviceTimeline(
               : 0;
         const durationHours = Math.max(endMs - startMs, 1000) / 3_600_000;
         const avgSpeed = (distanceMeters / 1000) / durationHours;
-        const mode =
-          normalizeTransportMode(top.type ?? act.type) ?? inferModeFromSpeed(avgSpeed);
+        const rawType = top.type ?? act.type;
+        const mode = normalizeTransportMode(rawType) ?? inferModeFromSpeed(avgSpeed);
+        const subtype = classifyActivitySubtype(rawType, mode);
 
         extractedActivities.push({
           startTimeMs: startMs,
           endTimeMs: endMs,
           localDateKey: extractLocalDateKey(rec.startTime, startMs),
           mode,
+          subtype,
           startCoord,
           endCoord,
           distanceMeters:
@@ -689,6 +769,7 @@ function parseOnDeviceTimeline(
         drafts.push({
           kind: 'ACTIVITY',
           mode: act.mode,
+          subtype: act.subtype,
           startTimeMs: act.startTimeMs,
           endTimeMs: act.endTimeMs,
           localDateKey: act.localDateKey,
@@ -811,6 +892,7 @@ function parseSemanticHistory(
       const durationHours = Math.max(endMs - startMs, 1000) / 3_600_000;
       const avgSpeed = (explicitDist / 1000) / durationHours;
       const mode = normalizeTransportMode(seg.activityType) ?? inferModeFromSpeed(avgSpeed);
+      const subtype = classifyActivitySubtype(seg.activityType, mode);
 
       let pts: RawPoint[] = [];
 
@@ -913,6 +995,7 @@ function parseSemanticHistory(
           drafts.push({
             kind: 'ACTIVITY',
             mode,
+            subtype,
             startTimeMs: startMs,
             endTimeMs: endMs,
             localDateKey: extractLocalDateKey(rawStart, startMs),
@@ -1444,6 +1527,7 @@ function buildTripFromDrafts(
       id: `${tripId}-seg-${sIdx}`,
       kind: draft.kind,
       mode: draft.mode,
+      subtype: draft.kind === 'VISIT' ? 'STILL' : draft.subtype ?? classifyActivitySubtype(undefined, draft.mode),
       startTimeMs: segStartTime,
       endTimeMs: segEndTime,
       durationMs: Math.max(segDuration, segEndTime - segStartTime),
@@ -1627,6 +1711,222 @@ function buildIndividualJourneys(sortedDrafts: RawSegmentDraft[]): Trip[] {
   return journeys;
 }
 
+const SUBTYPE_LABELS: Record<ActivitySubtype, string> = {
+  SUBWAY: 'Subway',
+  TRAM: 'Tram',
+  BUS: 'Bus',
+  TRAIN: 'Train',
+  WALKING: 'Walk',
+  DRIVING: 'Driving',
+  CYCLING: 'Cycling',
+  FLYING: 'Flight',
+  STILL: 'Stationary',
+};
+
+function computeLifetimeStats(dayTrips: Trip[], trips: Trip[]): LifetimeStats {
+  const modeMap = new Map<ActivitySubtype, ModeBreakdownItem>();
+  const locationMap = new Map<
+    string,
+    {
+      coordKey: string;
+      name: string;
+      latSum: number;
+      lngSum: number;
+      count: number;
+      totalDwellMs: number;
+    }
+  >();
+
+  let totalDistanceM = 0;
+  let totalDurationMs = 0;
+  let totalVisits = 0;
+
+  for (const day of dayTrips) {
+    totalDistanceM += day.distanceM;
+    totalDurationMs += day.durationMs;
+    totalVisits += day.visits.length;
+
+    for (const seg of day.segments) {
+      if (seg.kind !== 'ACTIVITY') continue;
+      const subtype = seg.subtype ?? classifyActivitySubtype(undefined, seg.mode);
+      const existing = modeMap.get(subtype);
+      if (existing) {
+        existing.distanceM += seg.distanceM;
+        existing.durationMs += seg.durationMs;
+        existing.segmentCount += 1;
+      } else {
+        modeMap.set(subtype, {
+          subtype,
+          label: SUBTYPE_LABELS[subtype],
+          mode: seg.mode,
+          distanceM: seg.distanceM,
+          durationMs: seg.durationMs,
+          segmentCount: 1,
+        });
+      }
+    }
+
+    for (const v of day.visits) {
+      const cellKey = `${v.lat.toFixed(3)},${v.lng.toFixed(3)}`;
+      const existing = locationMap.get(cellKey);
+      const isGeneric =
+        !v.name ||
+        v.name === 'Stop' ||
+        v.name === 'Pinned Place' ||
+        v.name.startsWith('Stop #');
+
+      if (existing) {
+        existing.latSum += v.lat;
+        existing.lngSum += v.lng;
+        existing.count += 1;
+        existing.totalDwellMs += v.dwellDurationMs;
+        if (
+          !isGeneric &&
+          (existing.name === 'Stop' ||
+            existing.name === 'Pinned Place' ||
+            existing.name.startsWith('Stop #'))
+        ) {
+          existing.name = v.name;
+        }
+      } else {
+        locationMap.set(cellKey, {
+          coordKey: `${v.lat.toFixed(4)},${v.lng.toFixed(4)}`,
+          name: v.name || 'Stop',
+          latSum: v.lat,
+          lngSum: v.lng,
+          count: 1,
+          totalDwellMs: v.dwellDurationMs,
+        });
+      }
+    }
+  }
+
+  const modeBreakdown = Array.from(modeMap.values()).sort(
+    (a, b) => b.distanceM - a.distanceM
+  );
+
+  const topLocations: TopLocationItem[] = Array.from(locationMap.values())
+    .sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count;
+      return b.totalDwellMs - a.totalDwellMs;
+    })
+    .slice(0, 10)
+    .map((loc) => ({
+      coordKey: loc.coordKey,
+      name: loc.name,
+      lat: loc.latSum / loc.count,
+      lng: loc.lngSum / loc.count,
+      visitCount: loc.count,
+      totalDwellMs: loc.totalDwellMs,
+    }));
+
+  return {
+    totalDistanceM,
+    totalDurationMs,
+    totalTrips: trips.length,
+    totalDays: dayTrips.length,
+    totalVisits,
+    modeBreakdown,
+    topLocations,
+  };
+}
+
+export function buildAllTimeHeatmapGeoJson(
+  dayTrips: Trip[]
+): GeoJSON.FeatureCollection {
+  const features: GeoJSON.Feature[] = [];
+  let totalMovingWaypoints = 0;
+
+  for (const day of dayTrips) {
+    for (const seg of day.segments) {
+      if (seg.kind === 'ACTIVITY') {
+        totalMovingWaypoints += Math.max(
+          0,
+          seg.endWaypointIndex - seg.startWaypointIndex + 1
+        );
+      }
+    }
+  }
+
+  const heatPointStride = Math.max(1, Math.ceil(totalMovingWaypoints / 5000));
+  let globalWpCounter = 0;
+
+  for (const day of dayTrips) {
+    for (const seg of day.segments) {
+      if (seg.kind !== 'ACTIVITY') continue;
+      const start = seg.startWaypointIndex;
+      const end = Math.min(day.waypoints.length - 1, seg.endWaypointIndex);
+      if (end - start < 1) continue;
+
+      const count = end - start + 1;
+      const lineStride = Math.max(1, Math.floor(count / 22));
+      const coords: [number, number][] = [];
+
+      for (let i = start; i <= end; i += lineStride) {
+        const wp = day.waypoints[i];
+        coords.push([wp.lng, wp.lat]);
+      }
+      const lastWp = day.waypoints[end];
+      const tail = coords[coords.length - 1];
+      if (!tail || tail[0] !== lastWp.lng || tail[1] !== lastWp.lat) {
+        coords.push([lastWp.lng, lastWp.lat]);
+      }
+
+      if (coords.length >= 2) {
+        features.push({
+          type: 'Feature',
+          properties: {
+            kind: 'route',
+            mode: seg.mode,
+            color: MODE_COLORS[seg.mode],
+          },
+          geometry: {
+            type: 'LineString',
+            coordinates: coords,
+          },
+        });
+      }
+
+      for (let i = start; i <= end; i++) {
+        if (globalWpCounter % heatPointStride === 0) {
+          const wp = day.waypoints[i];
+          features.push({
+            type: 'Feature',
+            properties: {
+              kind: 'heat',
+              weight: seg.mode === 'FLYING' ? 0.35 : 0.85,
+            },
+            geometry: {
+              type: 'Point',
+              coordinates: [wp.lng, wp.lat],
+            },
+          });
+        }
+        globalWpCounter++;
+      }
+    }
+
+    for (const v of day.visits) {
+      features.push({
+        type: 'Feature',
+        properties: {
+          kind: 'heat',
+          weight: 1.0,
+        },
+        geometry: {
+          type: 'Point',
+          coordinates: [v.lng, v.lat],
+        },
+      });
+    }
+  }
+
+  return {
+    type: 'FeatureCollection',
+    features,
+  };
+}
+
 function finalizeTripsAndDays(
   drafts: RawSegmentDraft[],
   schema: TimelineSchemaFormat,
@@ -1673,6 +1973,8 @@ function finalizeTripsAndDays(
     throw new TimelineParseError('No valid trips could be constructed from this file.');
   }
 
+  onProgress?.(90, 'Computing lifetime statistics & heatmap...');
+
   const yearMonthSet = new Set<string>();
   let totalWaypoints = 0;
   let totalVisits = 0;
@@ -1702,11 +2004,15 @@ function finalizeTripsAndDays(
     parseDurationMs: Math.round(performance.now() - startPerfMs),
   };
 
+  const lifetimeStats = computeLifetimeStats(dayTrips, trips);
+  const heatmapGeoJson = buildAllTimeHeatmapGeoJson(dayTrips);
+
   const index: TimelineSummaryIndex = {
     days: dayTrips.map((t) => summarizeTrip(t, 'DAY')),
     journeys: trips.map((t) => summarizeTrip(t, 'JOURNEY')),
     yearMonths,
     stats,
+    lifetimeStats,
   };
 
   onProgress?.(100, 'Timeline ready');
@@ -1716,6 +2022,7 @@ function finalizeTripsAndDays(
     trips,
     index,
     stats,
+    heatmapGeoJson,
   };
 }
 

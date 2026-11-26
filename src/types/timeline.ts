@@ -6,6 +6,17 @@ export type TransportMode =
   | 'FLYING'
   | 'STILL';
 
+export type ActivitySubtype =
+  | 'SUBWAY'
+  | 'TRAM'
+  | 'BUS'
+  | 'TRAIN'
+  | 'WALKING'
+  | 'DRIVING'
+  | 'CYCLING'
+  | 'FLYING'
+  | 'STILL';
+
 export type TimelineSchemaFormat =
   | 'ON_DEVICE_TIMELINE'
   | 'SEMANTIC_HISTORY'
@@ -13,6 +24,23 @@ export type TimelineSchemaFormat =
   | 'UNKNOWN';
 
 export type TimelineViewMode = 'DAY' | 'JOURNEY';
+
+export type MapStyleId = 'DARK' | 'SATELLITE' | 'DAYLIGHT';
+
+export type CameraMode = 'CHASE' | 'DRONE' | 'OVERVIEW' | 'FREE';
+
+export type AccentThemeId = 'CYAN' | 'CRIMSON' | 'EMERALD' | 'AMBER';
+
+export type UnitSystem = 'METRIC' | 'IMPERIAL';
+
+export interface AppSettings {
+  accentTheme: AccentThemeId;
+  routeWidth: number;
+  routeGlow: boolean;
+  units: UnitSystem;
+  mapStyle: MapStyleId;
+  enable3D: boolean;
+}
 
 export interface Waypoint {
   lat: number;
@@ -40,6 +68,7 @@ export interface TripSegment {
   id: string;
   kind: 'ACTIVITY' | 'VISIT';
   mode: TransportMode;
+  subtype?: ActivitySubtype;
   startTimeMs: number;
   endTimeMs: number;
   durationMs: number;
@@ -85,6 +114,34 @@ export interface TripSummary {
   visitNames: string[];
 }
 
+export interface ModeBreakdownItem {
+  subtype: ActivitySubtype;
+  label: string;
+  mode: TransportMode;
+  distanceM: number;
+  durationMs: number;
+  segmentCount: number;
+}
+
+export interface TopLocationItem {
+  coordKey: string;
+  name: string;
+  lat: number;
+  lng: number;
+  visitCount: number;
+  totalDwellMs: number;
+}
+
+export interface LifetimeStats {
+  totalDistanceM: number;
+  totalDurationMs: number;
+  totalTrips: number;
+  totalDays: number;
+  totalVisits: number;
+  modeBreakdown: ModeBreakdownItem[];
+  topLocations: TopLocationItem[];
+}
+
 export interface TimelineParseStats {
   schema: TimelineSchemaFormat;
   totalInputRecords: number;
@@ -102,6 +159,7 @@ export interface TimelineSummaryIndex {
   journeys: TripSummary[];
   yearMonths: string[];
   stats: TimelineParseStats;
+  lifetimeStats: LifetimeStats;
 }
 
 export interface ParsedTimelineResult {
@@ -109,9 +167,8 @@ export interface ParsedTimelineResult {
   trips: Trip[];
   index: TimelineSummaryIndex;
   stats: TimelineParseStats;
+  heatmapGeoJson: GeoJSON.FeatureCollection;
 }
-
-export type CameraMode = 'CHASE' | 'OVERVIEW' | 'FREE';
 
 export type SpeedPreset =
   | { kind: 'MULTIPLIER'; multiplier: 1 | 10 | 60 | 300; label: string }
@@ -144,7 +201,8 @@ export interface TelemetryFrame {
 export type WorkerRequest =
   | { id: number; type: 'PARSE_FILE'; file: File }
   | { id: number; type: 'PARSE_TEXT'; text: string }
-  | { id: number; type: 'GET_TRIP'; tripId: string; viewMode: TimelineViewMode };
+  | { id: number; type: 'GET_TRIP'; tripId: string; viewMode: TimelineViewMode }
+  | { id: number; type: 'GET_HEATMAP' };
 
 export type WorkerResponse =
   | { id: number; type: 'PROGRESS'; percent: number; stage: string }
@@ -156,6 +214,7 @@ export type WorkerResponse =
       initialViewMode: TimelineViewMode;
     }
   | { id: number; type: 'TRIP_DATA'; trip: Trip | null }
+  | { id: number; type: 'HEATMAP_DATA'; geojson: GeoJSON.FeatureCollection }
   | { id: number; type: 'ERROR'; message: string };
 
 export interface ToastMessage {

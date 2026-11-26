@@ -1,13 +1,13 @@
 import { useCallback, useRef, useState } from 'react';
-import {
-  Pause,
-  Play,
-  Repeat,
-  SkipBack,
-  SkipForward,
-} from 'lucide-react';
+import { Pause, Play, Repeat, SkipBack, SkipForward } from 'lucide-react';
 import { SPEED_PRESETS } from '../engine/animationController';
-import type { SpeedPreset, TelemetryFrame, Trip } from '../types/timeline';
+import type {
+  AccentThemeId,
+  SpeedPreset,
+  TelemetryFrame,
+  Trip,
+  UnitSystem,
+} from '../types/timeline';
 import {
   formatClock,
   formatDistance,
@@ -15,11 +15,14 @@ import {
   formatShortTime,
 } from '../utils/format';
 import { clamp, lerp, MODE_COLORS, MODE_LABELS } from '../utils/geo';
+import { ACCENT_THEMES } from '../utils/settings';
 
 interface PlaybackDockProps {
   trip: Trip | null;
   frame: TelemetryFrame | null;
   sidebarOpen: boolean;
+  units: UnitSystem;
+  accentTheme: AccentThemeId;
   onTogglePlay: () => void;
   onSeekProgress: (progress: number) => void;
   onStepSegment: (delta: -1 | 1) => void;
@@ -31,6 +34,8 @@ export function PlaybackDock({
   trip,
   frame,
   sidebarOpen,
+  units,
+  accentTheme,
   onTogglePlay,
   onSeekProgress,
   onStepSegment,
@@ -75,6 +80,7 @@ export function PlaybackDock({
 
   if (!trip || !frame) return null;
 
+  const accent = ACCENT_THEMES[accentTheme];
   const totalSpan = Math.max(1, trip.endTimeMs - trip.startTimeMs);
   const hoverTimeMs =
     hoverProgress !== null ? lerp(trip.startTimeMs, trip.endTimeMs, hoverProgress) : null;
@@ -113,7 +119,7 @@ export function PlaybackDock({
             </span>
             <span className="hidden sm:inline text-slate-500">·</span>
             <span className="hidden sm:inline text-slate-400 tabular-nums shrink-0">
-              {formatDistance(trip.distanceM)} · {formatDuration(trip.durationMs)}
+              {formatDistance(trip.distanceM, units)} · {formatDuration(trip.durationMs)}
             </span>
           </div>
 
@@ -140,7 +146,6 @@ export function PlaybackDock({
           tabIndex={0}
           className="relative h-7 flex items-center cursor-pointer group select-none touch-none"
         >
-          {/* Hover Timestamp Preview */}
           {hoverProgress !== null && hoverTimeMs !== null && (
             <div
               className="absolute -top-9 -translate-x-1/2 px-2.5 py-1 rounded-lg bg-slate-900/95 border border-white/15 text-[10px] text-slate-100 whitespace-nowrap shadow-xl pointer-events-none z-10 flex items-center gap-1.5"
@@ -162,7 +167,6 @@ export function PlaybackDock({
             </div>
           )}
 
-          {/* Segmented Track Bar */}
           <div className="relative w-full h-2.5 rounded-full bg-slate-800/90 overflow-hidden flex">
             {trip.segments.map((seg) => {
               const leftPct = ((seg.startTimeMs - trip.startTimeMs) / totalSpan) * 100;
@@ -186,14 +190,12 @@ export function PlaybackDock({
               );
             })}
 
-            {/* Unplayed dark overlay past current playhead */}
             <div
               className="absolute top-0 right-0 bottom-0 bg-slate-950/65 pointer-events-none"
               style={{ left: `${frame.progress * 100}%` }}
             />
           </div>
 
-          {/* Visit Anchor Markers along Track */}
           {trip.visits.map((v) => {
             const posPct = ((v.startTimeMs - trip.startTimeMs) / totalSpan) * 100;
             return (
@@ -205,16 +207,18 @@ export function PlaybackDock({
             );
           })}
 
-          {/* Playhead Knob */}
           <div
-            style={{ left: `${frame.progress * 100}%` }}
-            className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-white shadow-lg shadow-cyan-500/40 ring-2 ring-cyan-400 group-hover:scale-110 transition-transform pointer-events-none"
+            style={{
+              left: `${frame.progress * 100}%`,
+              boxShadow: `0 0 12px ${accent.primary}`,
+              borderColor: accent.primary,
+            }}
+            className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-white border-2 group-hover:scale-110 transition-transform pointer-events-none"
           />
         </div>
 
         {/* Bottom Controls Row */}
         <div className="flex flex-wrap items-center justify-between gap-2">
-          {/* Transport Buttons */}
           <div className="flex items-center gap-1.5">
             <button
               type="button"
@@ -229,7 +233,12 @@ export function PlaybackDock({
             <button
               type="button"
               onClick={onTogglePlay}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-semibold text-xs shadow-lg shadow-cyan-500/25 transition-all"
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl font-semibold text-xs shadow-lg transition-all hover:brightness-110"
+              style={{
+                backgroundColor: accent.buttonBg,
+                color: accent.buttonText,
+                boxShadow: `0 6px 20px ${accent.glow}`,
+              }}
               title={frame.isPlaying ? 'Pause (Space)' : 'Play (Space)'}
               aria-label={frame.isPlaying ? 'Pause playback' : 'Play playback'}
             >
@@ -259,11 +268,12 @@ export function PlaybackDock({
             <button
               type="button"
               onClick={onToggleLoop}
-              className={`p-2 rounded-xl border transition-colors ${
-                frame.loop
-                  ? 'bg-cyan-500/20 border-cyan-400/50 text-cyan-300'
-                  : 'bg-white/[0.04] border-white/5 text-slate-400 hover:text-white hover:bg-white/10'
-              }`}
+              className="p-2 rounded-xl border transition-colors"
+              style={{
+                backgroundColor: frame.loop ? accent.softBg : 'rgba(255,255,255,0.04)',
+                borderColor: frame.loop ? accent.border : 'rgba(255,255,255,0.06)',
+                color: frame.loop ? accent.text : '#94a3b8',
+              }}
               title="Toggle loop"
               aria-label="Toggle loop"
             >
@@ -271,7 +281,6 @@ export function PlaybackDock({
             </button>
           </div>
 
-          {/* Speed Multipliers & Fit Modes */}
           <div className="flex flex-wrap items-center gap-1.5">
             <div className="flex items-center p-0.5 rounded-xl bg-slate-900/90 border border-white/10">
               {multiplierPresets.map((preset) => {
@@ -281,11 +290,12 @@ export function PlaybackDock({
                     key={preset.label}
                     type="button"
                     onClick={() => onSelectSpeed(preset)}
-                    className={`px-2 py-1 rounded-lg text-[11px] font-mono font-medium transition-all ${
-                      active
-                        ? 'bg-cyan-400/20 text-cyan-200 border border-cyan-400/40'
-                        : 'text-slate-400 hover:text-slate-100 border border-transparent'
-                    }`}
+                    className="px-2 py-1 rounded-lg text-[11px] font-mono font-medium transition-all border"
+                    style={{
+                      backgroundColor: active ? accent.softBg : 'transparent',
+                      borderColor: active ? accent.border : 'transparent',
+                      color: active ? accent.text : '#94a3b8',
+                    }}
                   >
                     {preset.label}
                   </button>

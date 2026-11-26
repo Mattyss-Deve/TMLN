@@ -11,6 +11,10 @@ declare const self: DedicatedWorkerGlobalScope;
 
 let dayTripCache = new Map<string, Trip>();
 let journeyTripCache = new Map<string, Trip>();
+let cachedHeatmapGeoJson: GeoJSON.FeatureCollection = {
+  type: 'FeatureCollection',
+  features: [],
+};
 
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
   const req = event.data;
@@ -23,6 +27,16 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       id: req.id,
       type: 'TRIP_DATA',
       trip,
+    };
+    self.postMessage(response);
+    return;
+  }
+
+  if (req.type === 'GET_HEATMAP') {
+    const response: WorkerResponse = {
+      id: req.id,
+      type: 'HEATMAP_DATA',
+      geojson: cachedHeatmapGeoJson,
     };
     self.postMessage(response);
     return;
@@ -55,9 +69,9 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
 
     const result = parseTimelineText(text, reportProgress);
 
-    // Cache full Trip objects (with all waypoints) inside worker memory
     dayTripCache = new Map(result.dayTrips.map((t) => [t.id, t]));
     journeyTripCache = new Map(result.trips.map((t) => [t.id, t]));
+    cachedHeatmapGeoJson = result.heatmapGeoJson;
 
     const initialViewMode: TimelineViewMode =
       result.dayTrips.length > 0 ? 'DAY' : 'JOURNEY';
