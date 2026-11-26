@@ -1,0 +1,90 @@
+@import 'maplibre-gl/dist/maplibre-gl.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background-color: #070a0f;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom obsidian scrollbar */
+.obsidian-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.obsidian-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.obsidian-scroll::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.22);
+  border-radius: 9999px;
+}
+
+.obsidian-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.4);
+}
+
+/* Pulsing location puck animations */
+@keyframes puck-sonar {
+  0% {
+    transform: translate(-50%, -50%) scale(0.55);
+    opacity: 0.85;
+  }
+  70% {
+    transform: translate(-50%, -50%) scale(2.15);
+    opacity: 0;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(2.15);
+    opacity: 0;
+  }
+}
+
+@keyframes visit-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.75;
+  }
+  50% {
+    transform: scale(1.35);
+    opacity: 0.2;
+  }
+}
+
+.puck-sonar-ring {
+  animation: puck-sonar 2s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+.visit-pulse-ring {
+  animation: visit-pulse 2s ease-in-out infinite;
+}
+
+/* MapLibre attribution compact styling for obsidian UI */
+.maplibregl-ctrl-attrib {
+  background-color: rgba(7, 10, 15, 0.65) !important;
+  color: rgba(148, 163, 184, 0.65) !important;
+  backdrop-filter: blur(8px);
+  border-radius: 6px 0 0 0;
+  font-size: 10px !important;
+}
+
+.maplibregl-ctrl-attrib a {
+  color: rgba(148, 163, 184, 0.85) !important;
+}
