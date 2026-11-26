@@ -1,6 +1,6 @@
 # ChronoMap — Private Google Timeline Replay
 
-A privacy-first, 100% client-side web application and installable PWA for importing Google Timeline `.json` exports and replaying journeys with a 60fps MapLibre GL animation engine. Zero location data ever leaves the browser.
+A privacy-first, 100% client-side web application, installable PWA, and Capacitor Android app for importing Google Timeline `.json` exports and replaying journeys with a 60fps MapLibre GL animation engine. Zero location data ever leaves the device.
 
 ## Features
 
@@ -17,8 +17,9 @@ A privacy-first, 100% client-side web application and installable PWA for import
   - Realistic Bay Area & Pacific Coast multi-day dataset covering walking, rail transit, driving, cycling, flight, and timed landmark visits.
 - **Obsidian Glassmorphic HUD**
   - Collapsible Trip Explorer (`TripSidebar`), live Telemetry HUD (`TelemetryHUD`), and Media Playback Dock (`PlaybackDock`) with real-time multipliers (`1x`–`300x`) and normalized fit presets (`Fit 15s`, `Fit 30s`, `Fit 60s`).
-- **Installable PWA & Offline App Shell**
-  - Configured with `public/manifest.webmanifest`, PNG/SVG icons (`public/icons/`), and `public/sw.js` (registered in production builds via `src/main.tsx`).
+- **Installable PWA & Capacitor Android App**
+  - PWA manifest (`public/manifest.webmanifest`), PNG/SVG icons (`public/icons/`), and Service Worker (`public/sw.js`).
+  - Native Android Capacitor wrapper (`android/`, app ID `com.chronomap.app`, `INTERNET` permission enabled in `android/app/src/main/AndroidManifest.xml`).
 
 ## Local Development
 
@@ -31,8 +32,7 @@ npm run dev
 
 Open `http://127.0.0.1:5173` in a WebGL-capable browser.
 
-## GitHub Pages Deployment & Android Packaging
+## GitHub Actions & Android APK Builds
 
-- **Auto-Deploy Workflow (`.github/workflows/deploy.yml`):** Pushing to `main` or `master` runs `npm ci`, `npm test`, and `npm run build`, uploads `dist/` as a workflow artifact (`chronomap-dist`), and deploys `dist/` to GitHub Pages (enable **Settings → Pages → Source: GitHub Actions** in your repository).
-- **Install on Android as a PWA:** Open the deployed HTTPS URL in Chrome on Android and tap **Install app** / **Add to Home screen** to run ChronoMap full-screen with its own launcher icon.
-- **Package as a Play/Sideload APK:** Because ChronoMap is a complete PWA (`manifest.webmanifest` + Service Worker + 192/512 PNG icons + relative `./` assets), the deployed URL can be wrapped directly into an Android APK using **PWABuilder / Bubblewrap (TWA)** or packaged locally via **Capacitor** (`npx cap init` + `npx cap add android` pointing at `dist/`).
+- **GitHub Pages Web/PWA Deploy (`.github/workflows/deploy.yml`):** Automatically builds `dist/` and deploys to GitHub Pages on pushes to `main`/`master` (enable **Settings → Pages → Source: GitHub Actions**).
+- **Automated Android APK Build (`.github/workflows/build-apk.yml`):** Triggers on pushes to `main` or manual `workflow_dispatch`, runs `npm ci && npm run build && npx cap sync android`, compiles `android/app/build/outputs/apk/debug/app-debug.apk` with Java 21 (Temurin) + Gradle, and uploads it as the **`ChronoMap-APK`** workflow artifact.

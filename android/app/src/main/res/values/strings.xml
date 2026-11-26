@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">ChronoMap</string>
+    <string name="title_activity_main">ChronoMap</string>
+    <string name="package_name">com.chronomap.app</string>
+    <string name="custom_url_scheme">com.chronomap.app</string>
+</resources>
