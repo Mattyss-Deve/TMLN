@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
-  ParsedTimelineResult,
+  TimelineSummaryIndex,
+  TimelineViewMode,
+  Trip,
   WorkerRequest,
   WorkerResponse,
 } from '../types/timeline';
@@ -11,83 +13,142 @@ export interface TimelineWorkerState {
   stage: string;
 }
 
+export interface WorkerParseResult {
+  index: TimelineSummaryIndex;
+  initialTrip: Trip | null;
+  initialViewMode: TimelineViewMode;
+}
+
+interface PendingEntry {
+  kind: 'PARSE' | 'GET_TRIP';
+  resolve: (value: unknown) => void;
+  reject: (err: Error) => void;
+  onProgress?: (percent: number, stage: string) => void;
+}
+
 export class TimelineWorkerClient {
   private worker: Worker | null = null;
   private nextRequestId = 1;
-  private activeId: number | null = null;
-  private pendingReject: ((err: Error) => void) | null = null;
+  private activeParseId: number | null = null;
+  private pending = new Map<number, PendingEntry>();
 
   private ensureWorker(): Worker {
     if (!this.worker) {
-      this.worker = new Worker(
+      const worker = new Worker(
         new URL('./timeline.worker.ts', import.meta.url),
         { type: 'module' }
       );
+
+      worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+        const msg = event.data;
+        if (!msg) return;
+
+        const entry = this.pending.get(msg.id);
+        if (!entry) return;
+
+        if (msg.type === 'PROGRESS') {
+          entry.onProgress?.(msg.percent, msg.stage);
+          return;
+        }
+
+        this.pending.delete(msg.id);
+        if (this.activeParseId === msg.id) {
+          this.activeParseId = null;
+        }
+
+        if (msg.type === 'INDEX_READY') {
+          entry.resolve({
+            index: msg.index,
+            initialTrip: msg.initialTrip,
+            initialViewMode: msg.initialViewMode,
+          } satisfies WorkerParseResult);
+        } else if (msg.type === 'TRIP_DATA') {
+          entry.resolve(msg.trip);
+        } else if (msg.type === 'ERROR') {
+          entry.reject(new Error(msg.message));
+        }
+      };
+
+      worker.onerror = (event) => {
+        const err = new Error(event.message || 'Timeline parser worker crashed.');
+        for (const [, entry] of this.pending) {
+          entry.reject(err);
+        }
+        this.pending.clear();
+        this.activeParseId = null;
+      };
+
+      this.worker = worker;
     }
+
     return this.worker;
   }
 
   public parseFile(
     file: File,
     onProgress?: (percent: number, stage: string) => void
-  ): Promise<ParsedTimelineResult> {
+  ): Promise<WorkerParseResult> {
+    if (this.activeParseId !== null) {
+      this.cancel();
+    }
     const id = this.nextRequestId++;
-    return this.dispatch({ id, type: 'PARSE_FILE', file }, onProgress);
+    this.activeParseId = id;
+    return this.dispatch<WorkerParseResult>(
+      { id, type: 'PARSE_FILE', file },
+      'PARSE',
+      onProgress
+    );
   }
 
   public parseText(
     text: string,
     onProgress?: (percent: number, stage: string) => void
-  ): Promise<ParsedTimelineResult> {
+  ): Promise<WorkerParseResult> {
+    if (this.activeParseId !== null) {
+      this.cancel();
+    }
     const id = this.nextRequestId++;
-    return this.dispatch({ id, type: 'PARSE_TEXT', text }, onProgress);
+    this.activeParseId = id;
+    return this.dispatch<WorkerParseResult>(
+      { id, type: 'PARSE_TEXT', text },
+      'PARSE',
+      onProgress
+    );
   }
 
-  private dispatch(
+  public getTrip(tripId: string, viewMode: TimelineViewMode): Promise<Trip | null> {
+    const id = this.nextRequestId++;
+    return this.dispatch<Trip | null>(
+      { id, type: 'GET_TRIP', tripId, viewMode },
+      'GET_TRIP'
+    );
+  }
+
+  private dispatch<T>(
     request: WorkerRequest,
+    kind: 'PARSE' | 'GET_TRIP',
     onProgress?: (percent: number, stage: string) => void
-  ): Promise<ParsedTimelineResult> {
-    this.cancel();
+  ): Promise<T> {
     const worker = this.ensureWorker();
-    this.activeId = request.id;
-
-    return new Promise<ParsedTimelineResult>((resolve, reject) => {
-      this.pendingReject = reject;
-
-      worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
-        const msg = event.data;
-        if (!msg || msg.id !== this.activeId) return;
-
-        if (msg.type === 'PROGRESS') {
-          onProgress?.(msg.percent, msg.stage);
-        } else if (msg.type === 'SUCCESS') {
-          this.clearPending();
-          resolve(msg.data);
-        } else if (msg.type === 'ERROR') {
-          this.clearPending();
-          reject(new Error(msg.message));
-        }
-      };
-
-      worker.onerror = (event) => {
-        this.clearPending();
-        reject(new Error(event.message || 'Timeline parser worker crashed.'));
-      };
-
+    return new Promise<T>((resolve, reject) => {
+      this.pending.set(request.id, {
+        kind,
+        resolve: resolve as (v: unknown) => void,
+        reject,
+        onProgress,
+      });
       worker.postMessage(request);
     });
   }
 
-  private clearPending(): void {
-    this.activeId = null;
-    this.pendingReject = null;
-  }
-
   public cancel(): void {
-    if (this.pendingReject) {
-      this.pendingReject(new Error('Parsing cancelled.'));
+    const cancelErr = new Error('Parsing cancelled.');
+    for (const [, entry] of this.pending) {
+      entry.reject(cancelErr);
     }
-    this.clearPending();
+    this.pending.clear();
+    this.activeParseId = null;
+
     if (this.worker) {
       this.worker.terminate();
       this.worker = null;
@@ -116,7 +177,7 @@ export function useTimelineWorker() {
     };
   }, []);
 
-  const parseFile = useCallback(async (file: File): Promise<ParsedTimelineResult> => {
+  const parseFile = useCallback(async (file: File): Promise<WorkerParseResult> => {
     if (!clientRef.current) {
       clientRef.current = new TimelineWorkerClient();
     }
@@ -133,7 +194,7 @@ export function useTimelineWorker() {
     }
   }, []);
 
-  const parseText = useCallback(async (text: string): Promise<ParsedTimelineResult> => {
+  const parseText = useCallback(async (text: string): Promise<WorkerParseResult> => {
     if (!clientRef.current) {
       clientRef.current = new TimelineWorkerClient();
     }
@@ -150,6 +211,14 @@ export function useTimelineWorker() {
     }
   }, []);
 
+  const getTrip = useCallback(
+    async (tripId: string, viewMode: TimelineViewMode): Promise<Trip | null> => {
+      if (!clientRef.current) return null;
+      return clientRef.current.getTrip(tripId, viewMode);
+    },
+    []
+  );
+
   const cancel = useCallback(() => {
     clientRef.current?.cancel();
     setState({ isParsing: false, progress: 0, stage: '' });
@@ -159,6 +228,7 @@ export function useTimelineWorker() {
     ...state,
     parseFile,
     parseText,
+    getTrip,
     cancel,
   };
 }

@@ -21,6 +21,18 @@
   font-variant-numeric: tabular-nums;
 }
 
+.safe-top-hud {
+  padding-top: env(safe-area-inset-top, 28px);
+}
+
+.safe-top-drawer {
+  top: calc(env(safe-area-inset-top, 28px) + 8px);
+}
+
+.safe-bottom-dock {
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 12px);
+}
+
 /* Custom obsidian scrollbar */
 .obsidian-scroll::-webkit-scrollbar {
   width: 6px;

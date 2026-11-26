@@ -12,6 +12,8 @@ export type TimelineSchemaFormat =
   | 'RAW_RECORDS'
   | 'UNKNOWN';
 
+export type TimelineViewMode = 'DAY' | 'JOURNEY';
+
 export interface Waypoint {
   lat: number;
   lng: number;
@@ -52,7 +54,7 @@ export interface TripSegment {
 
 export interface Trip {
   id: string;
-  dateKey: string; // YYYY-MM-DD in local time
+  dateKey: string; // Local YYYY-MM-DD
   title: string;
   startTimeMs: number;
   endTimeMs: number;
@@ -65,16 +67,22 @@ export interface Trip {
   bounds: [[number, number], [number, number]]; // [[west, south], [east, north]]
 }
 
-export interface DayGroup {
-  dateKey: string;
+export interface TripSummary {
+  id: string;
+  viewMode: TimelineViewMode;
+  dateKey: string; // Local YYYY-MM-DD
   dateLabel: string;
+  yearMonth: string; // YYYY-MM
+  title: string;
   startTimeMs: number;
   endTimeMs: number;
-  totalDistanceM: number;
-  totalDurationMs: number;
+  durationMs: number;
+  distanceM: number;
+  totalDistanceKm: number;
   modes: TransportMode[];
-  tripIds: string[];
+  segmentCount: number;
   visitCount: number;
+  visitNames: string[];
 }
 
 export interface TimelineParseStats {
@@ -89,9 +97,17 @@ export interface TimelineParseStats {
   parseDurationMs: number;
 }
 
+export interface TimelineSummaryIndex {
+  days: TripSummary[];
+  journeys: TripSummary[];
+  yearMonths: string[];
+  stats: TimelineParseStats;
+}
+
 export interface ParsedTimelineResult {
+  dayTrips: Trip[];
   trips: Trip[];
-  days: DayGroup[];
+  index: TimelineSummaryIndex;
   stats: TimelineParseStats;
 }
 
@@ -127,11 +143,19 @@ export interface TelemetryFrame {
 
 export type WorkerRequest =
   | { id: number; type: 'PARSE_FILE'; file: File }
-  | { id: number; type: 'PARSE_TEXT'; text: string };
+  | { id: number; type: 'PARSE_TEXT'; text: string }
+  | { id: number; type: 'GET_TRIP'; tripId: string; viewMode: TimelineViewMode };
 
 export type WorkerResponse =
   | { id: number; type: 'PROGRESS'; percent: number; stage: string }
-  | { id: number; type: 'SUCCESS'; data: ParsedTimelineResult }
+  | {
+      id: number;
+      type: 'INDEX_READY';
+      index: TimelineSummaryIndex;
+      initialTrip: Trip | null;
+      initialViewMode: TimelineViewMode;
+    }
+  | { id: number; type: 'TRIP_DATA'; trip: Trip | null }
   | { id: number; type: 'ERROR'; message: string };
 
 export interface ToastMessage {

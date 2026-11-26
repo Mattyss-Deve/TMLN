@@ -1,11 +1,13 @@
 import { useMemo, useRef, useState } from 'react';
 import {
   Calendar,
+  CalendarDays,
   ChevronLeft,
-  ChevronRight,
   Compass,
   FileJson,
+  Loader2,
   MapPin,
+  Route,
   Search,
   ShieldCheck,
   Sparkles,
@@ -13,27 +15,31 @@ import {
   X,
 } from 'lucide-react';
 import type {
-  DayGroup,
-  TimelineParseStats,
-  Trip,
+  TimelineSummaryIndex,
+  TimelineViewMode,
+  TripSummary,
 } from '../types/timeline';
 import {
   formatDistance,
   formatDuration,
   formatSchemaName,
   formatShortTime,
+  formatYearMonthLabel,
 } from '../utils/format';
 import { MODE_COLORS, MODE_LABELS } from '../utils/geo';
 import { ModeIcon } from './ModeIcon';
 
+const PAGE_SIZE = 80;
+
 interface TripSidebarProps {
   isOpen: boolean;
   onToggleOpen: () => void;
-  trips: Trip[];
-  days: DayGroup[];
-  stats: TimelineParseStats | null;
+  index: TimelineSummaryIndex | null;
+  viewMode: TimelineViewMode;
+  onViewModeChange: (mode: TimelineViewMode) => void;
   selectedTripId: string | null;
-  onSelectTrip: (tripId: string) => void;
+  onSelectTrip: (tripId: string, viewMode: TimelineViewMode) => void;
+  isLoadingTrip: boolean;
   onFileSelected: (file: File) => void;
   onLoadSample: () => void;
   isParsing: boolean;
@@ -45,11 +51,12 @@ interface TripSidebarProps {
 export function TripSidebar({
   isOpen,
   onToggleOpen,
-  trips,
-  days,
-  stats,
+  index,
+  viewMode,
+  onViewModeChange,
   selectedTripId,
   onSelectTrip,
+  isLoadingTrip,
   onFileSelected,
   onLoadSample,
   isParsing,
@@ -60,44 +67,39 @@ export function TripSidebar({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [monthFilter, setMonthFilter] = useState('');
   const [dateFilter, setDateFilter] = useState('');
+  const [visibleLimit, setVisibleLimit] = useState(PAGE_SIZE);
 
-  const tripById = useMemo(() => {
-    const map = new Map<string, Trip>();
-    for (const t of trips) map.set(t.id, t);
-    return map;
-  }, [trips]);
+  const activeList: TripSummary[] = useMemo(() => {
+    if (!index) return [];
+    return viewMode === 'DAY' ? index.days : index.journeys;
+  }, [index, viewMode]);
 
-  const filteredDays = useMemo(() => {
+  const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
 
-    return days
-      .filter((day) => !dateFilter || day.dateKey === dateFilter)
-      .map((day) => {
-        const matchingTrips = day.tripIds
-          .map((id) => tripById.get(id))
-          .filter((t): t is Trip => {
-            if (!t) return false;
-            if (!q) return true;
-            if (t.title.toLowerCase().includes(q)) return true;
-            if (t.dateKey.includes(q)) return true;
-            if (day.dateLabel.toLowerCase().includes(q)) return true;
-            if (t.modes.some((m) => MODE_LABELS[m].toLowerCase().includes(q))) {
-              return true;
-            }
-            if (t.visits.some((v) => v.name.toLowerCase().includes(q))) {
-              return true;
-            }
-            return false;
-          });
+    return activeList.filter((item) => {
+      if (monthFilter && item.yearMonth !== monthFilter) return false;
+      if (dateFilter && item.dateKey !== dateFilter) return false;
+      if (!q) return true;
+      if (item.title.toLowerCase().includes(q)) return true;
+      if (item.dateKey.includes(q)) return true;
+      if (item.dateLabel.toLowerCase().includes(q)) return true;
+      if (item.modes.some((m) => MODE_LABELS[m].toLowerCase().includes(q))) {
+        return true;
+      }
+      if (item.visitNames.some((n) => n.toLowerCase().includes(q))) {
+        return true;
+      }
+      return false;
+    });
+  }, [activeList, monthFilter, dateFilter, searchQuery]);
 
-        return {
-          day,
-          trips: matchingTrips,
-        };
-      })
-      .filter((entry) => entry.trips.length > 0);
-  }, [days, tripById, dateFilter, searchQuery]);
+  const visibleItems = useMemo(
+    () => filteredItems.slice(0, visibleLimit),
+    [filteredItems, visibleLimit]
+  );
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -118,29 +120,13 @@ export function TripSidebar({
   };
 
   if (!isOpen) {
-    return (
-      <div className="fixed top-4 left-4 z-30 flex items-center gap-2">
-        <button
-          type="button"
-          onClick={onToggleOpen}
-          className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-slate-950/80 border border-white/15 backdrop-blur-md text-slate-100 hover:bg-slate-900/90 hover:border-cyan-400/40 shadow-xl transition-all text-xs font-medium"
-          title="Expand Trip Explorer"
-        >
-          <Compass className="w-4 h-4 text-cyan-400" />
-          <span>Trips</span>
-          {trips.length > 0 && (
-            <span className="px-1.5 py-0.5 rounded-md bg-cyan-500/20 text-cyan-300 text-[10px] font-mono tabular-nums">
-              {trips.length}
-            </span>
-          )}
-          <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
-        </button>
-      </div>
-    );
+    return null;
   }
 
+  const stats = index?.stats ?? null;
+
   return (
-    <aside className="fixed top-3 left-3 bottom-3 z-30 w-[min(88vw,336px)] flex flex-col rounded-2xl bg-slate-950/80 border border-white/10 backdrop-blur-md shadow-2xl overflow-hidden">
+    <aside className="fixed safe-top-drawer left-3 bottom-3 z-30 w-[min(90vw,336px)] flex flex-col rounded-2xl bg-slate-950/85 border border-white/10 backdrop-blur-md shadow-2xl overflow-hidden">
       {/* Header */}
       <div className="px-4 pt-3.5 pb-3 border-b border-white/10 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
@@ -186,7 +172,7 @@ export function TripSidebar({
               fileInputRef.current?.click();
             }
           }}
-          className={`relative rounded-xl border border-dashed px-3 py-3 transition-all cursor-pointer select-none ${
+          className={`relative rounded-xl border border-dashed px-3 py-2.5 transition-all cursor-pointer select-none ${
             isDragging
               ? 'border-cyan-400 bg-cyan-500/15'
               : 'border-white/15 bg-white/[0.03] hover:bg-white/[0.06] hover:border-cyan-400/40'
@@ -254,7 +240,6 @@ export function TripSidebar({
           <span>Load Sample Journey</span>
         </button>
 
-        {/* Dataset Stats */}
         {stats && (
           <div className="grid grid-cols-3 gap-1.5 pt-0.5">
             <div className="px-2 py-1.5 rounded-lg bg-white/[0.03] border border-white/5">
@@ -285,15 +270,60 @@ export function TripSidebar({
         )}
       </div>
 
-      {/* Filters */}
-      {trips.length > 0 && (
+      {/* View Mode Toggle + Year/Month + Date + Search Filters */}
+      {index && (
         <div className="px-3 py-2.5 border-b border-white/10 space-y-2">
+          {/* By Day / Individual Journeys Switcher */}
+          <div className="grid grid-cols-2 p-0.5 rounded-xl bg-slate-900/90 border border-white/10">
+            <button
+              type="button"
+              onClick={() => {
+                setVisibleLimit(PAGE_SIZE);
+                onViewModeChange('DAY');
+              }}
+              className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-[11px] font-medium transition-all ${
+                viewMode === 'DAY'
+                  ? 'bg-cyan-400/20 text-cyan-200 border border-cyan-400/40'
+                  : 'text-slate-400 hover:text-slate-100 border border-transparent'
+              }`}
+            >
+              <CalendarDays className="w-3.5 h-3.5" />
+              <span>By Day</span>
+              <span className="text-[10px] font-mono opacity-80 tabular-nums">
+                {index.days.length}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setVisibleLimit(PAGE_SIZE);
+                onViewModeChange('JOURNEY');
+              }}
+              className={`flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-[11px] font-medium transition-all ${
+                viewMode === 'JOURNEY'
+                  ? 'bg-cyan-400/20 text-cyan-200 border border-cyan-400/40'
+                  : 'text-slate-400 hover:text-slate-100 border border-transparent'
+              }`}
+            >
+              <Route className="w-3.5 h-3.5" />
+              <span>Journeys</span>
+              <span className="text-[10px] font-mono opacity-80 tabular-nums">
+                {index.journeys.length}
+              </span>
+            </button>
+          </div>
+
+          {/* Search input */}
           <div className="relative">
             <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setVisibleLimit(PAGE_SIZE);
+              }}
               placeholder="Search trips, places, modes..."
               className="w-full pl-8 pr-7 py-1.5 rounded-lg bg-slate-900/80 border border-white/10 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-cyan-400/50"
             />
@@ -309,26 +339,41 @@ export function TripSidebar({
             )}
           </div>
 
-          <div className="flex items-center gap-1.5">
-            <div className="relative flex-1">
-              <Calendar className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+          {/* Year/Month dropdown + Date picker */}
+          <div className="grid grid-cols-2 gap-1.5">
+            <select
+              value={monthFilter}
+              onChange={(e) => {
+                setMonthFilter(e.target.value);
+                setDateFilter('');
+                setVisibleLimit(PAGE_SIZE);
+              }}
+              aria-label="Filter by month"
+              className="w-full px-2 py-1 rounded-lg bg-slate-900/80 border border-white/10 text-[11px] text-slate-200 focus:outline-none focus:border-cyan-400/50 [color-scheme:dark]"
+            >
+              <option value="">All Months ({index.yearMonths.length})</option>
+              {index.yearMonths.map((ym) => (
+                <option key={ym} value={ym}>
+                  {formatYearMonthLabel(ym)} ({ym})
+                </option>
+              ))}
+            </select>
+
+            <div className="relative">
+              <Calendar className="w-3 h-3 text-slate-400 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 type="date"
                 value={dateFilter}
-                onChange={(e) => setDateFilter(e.target.value)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setDateFilter(val);
+                  if (val) setMonthFilter('');
+                  setVisibleLimit(PAGE_SIZE);
+                }}
                 aria-label="Filter by date"
-                className="w-full pl-8 pr-2 py-1 rounded-lg bg-slate-900/80 border border-white/10 text-[11px] text-slate-200 focus:outline-none focus:border-cyan-400/50 [color-scheme:dark]"
+                className="w-full pl-6 pr-1 py-1 rounded-lg bg-slate-900/80 border border-white/10 text-[11px] text-slate-200 focus:outline-none focus:border-cyan-400/50 [color-scheme:dark]"
               />
             </div>
-            {dateFilter && (
-              <button
-                type="button"
-                onClick={() => setDateFilter('')}
-                className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] text-slate-300"
-              >
-                All
-              </button>
-            )}
           </div>
 
           {stats && (
@@ -337,15 +382,20 @@ export function TripSidebar({
                 <FileJson className="w-3 h-3 text-cyan-400/80 shrink-0" />
                 <span className="truncate">{formatSchemaName(stats.schema)}</span>
               </span>
-              <span className="tabular-nums shrink-0">{stats.parseDurationMs}ms</span>
+              <span className="tabular-nums shrink-0 flex items-center gap-1">
+                {isLoadingTrip && (
+                  <Loader2 className="w-3 h-3 text-cyan-400 animate-spin" />
+                )}
+                <span>{stats.parseDurationMs}ms</span>
+              </span>
             </div>
           )}
         </div>
       )}
 
-      {/* Scrollable Day & Trip List */}
-      <div className="flex-1 overflow-y-auto obsidian-scroll p-2.5 space-y-3">
-        {trips.length === 0 ? (
+      {/* Scrollable Summary List */}
+      <div className="flex-1 overflow-y-auto obsidian-scroll p-2.5 space-y-2">
+        {!index ? (
           <div className="h-full flex flex-col items-center justify-center text-center px-4 py-8">
             <div className="w-11 h-11 rounded-2xl bg-slate-900/90 border border-white/10 flex items-center justify-center mb-3">
               <MapPin className="w-5 h-5 text-slate-400" />
@@ -360,15 +410,16 @@ export function TripSidebar({
               to preview.
             </p>
           </div>
-        ) : filteredDays.length === 0 ? (
+        ) : filteredItems.length === 0 ? (
           <div className="text-center py-8 px-4">
             <p className="text-xs font-medium text-slate-300">
-              No trips match your filters
+              No {viewMode === 'DAY' ? 'days' : 'journeys'} match your filters
             </p>
             <button
               type="button"
               onClick={() => {
                 setSearchQuery('');
+                setMonthFilter('');
                 setDateFilter('');
               }}
               className="mt-2 px-3 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[11px] text-cyan-300"
@@ -377,73 +428,73 @@ export function TripSidebar({
             </button>
           </div>
         ) : (
-          filteredDays.map(({ day, trips: dayTrips }) => (
-            <div key={day.dateKey} className="space-y-1.5">
-              <div className="px-1.5 flex items-center justify-between text-[11px]">
-                <span className="font-semibold text-slate-300 tracking-tight">
-                  {day.dateLabel}
-                </span>
-                <span className="text-[10px] text-slate-400 tabular-nums">
-                  {formatDistance(day.totalDistanceM)} · {formatDuration(day.totalDurationMs)}
-                </span>
-              </div>
-
-              <div className="space-y-1.5">
-                {dayTrips.map((trip) => {
-                  const isSelected = trip.id === selectedTripId;
-                  return (
-                    <button
-                      key={trip.id}
-                      type="button"
-                      onClick={() => onSelectTrip(trip.id)}
-                      className={`w-full text-left p-2.5 rounded-xl border transition-all ${
-                        isSelected
-                          ? 'bg-cyan-500/15 border-cyan-400/50 shadow-lg shadow-cyan-950/30'
-                          : 'bg-white/[0.03] border-white/5 hover:bg-white/[0.07] hover:border-white/15'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <span className="text-xs font-medium text-slate-100 leading-snug line-clamp-2">
-                          {trip.title}
-                        </span>
-                        <span className="text-[10px] font-mono text-slate-400 tabular-nums shrink-0 mt-0.5">
-                          {formatShortTime(trip.startTimeMs)}
-                        </span>
+          <>
+            {visibleItems.map((item) => {
+              const isSelected = item.id === selectedTripId;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => onSelectTrip(item.id, item.viewMode)}
+                  className={`w-full text-left p-2.5 rounded-xl border transition-all ${
+                    isSelected
+                      ? 'bg-cyan-500/15 border-cyan-400/50 shadow-lg shadow-cyan-950/30'
+                      : 'bg-white/[0.03] border-white/5 hover:bg-white/[0.07] hover:border-white/15'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="text-[10px] font-medium text-cyan-300/90 truncate">
+                        {item.dateLabel}
                       </div>
-
-                      <div className="mt-2 flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-1 flex-wrap">
-                          {trip.modes
-                            .filter((m) => m !== 'STILL' || trip.modes.length === 1)
-                            .map((mode) => (
-                              <span
-                                key={mode}
-                                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-slate-900/90 border border-white/10 text-[10px]"
-                                style={{ color: MODE_COLORS[mode] }}
-                                title={MODE_LABELS[mode]}
-                              >
-                                <ModeIcon mode={mode} className="w-2.5 h-2.5" />
-                              </span>
-                            ))}
-                          {trip.visits.length > 0 && (
-                            <span className="text-[10px] text-slate-400 ml-0.5 tabular-nums">
-                              {trip.visits.length}{' '}
-                              {trip.visits.length === 1 ? 'stop' : 'stops'}
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="text-[10px] text-slate-300 tabular-nums shrink-0">
-                          {formatDistance(trip.distanceM)} ·{' '}
-                          {formatDuration(trip.durationMs)}
-                        </div>
+                      <div className="text-xs font-medium text-slate-100 leading-snug line-clamp-2 mt-0.5">
+                        {item.title}
                       </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ))
+                    </div>
+                    <span className="text-[10px] font-mono text-slate-400 tabular-nums shrink-0 mt-0.5">
+                      {formatShortTime(item.startTimeMs)}
+                    </span>
+                  </div>
+
+                  <div className="mt-2 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1 flex-wrap">
+                      {item.modes
+                        .filter((m) => m !== 'STILL' || item.modes.length === 1)
+                        .map((mode) => (
+                          <span
+                            key={mode}
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-slate-900/90 border border-white/10 text-[10px]"
+                            style={{ color: MODE_COLORS[mode] }}
+                            title={MODE_LABELS[mode]}
+                          >
+                            <ModeIcon mode={mode} className="w-2.5 h-2.5" />
+                          </span>
+                        ))}
+                      <span className="text-[10px] text-slate-400 ml-0.5 tabular-nums">
+                        {item.segmentCount} seg
+                        {item.visitCount > 0 ? ` · ${item.visitCount} stop${item.visitCount === 1 ? '' : 's'}` : ''}
+                      </span>
+                    </div>
+
+                    <div className="text-[10px] text-slate-300 tabular-nums shrink-0">
+                      {formatDistance(item.distanceM)} ·{' '}
+                      {formatDuration(item.durationMs)}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+
+            {filteredItems.length > visibleLimit && (
+              <button
+                type="button"
+                onClick={() => setVisibleLimit((v) => v + PAGE_SIZE)}
+                className="w-full py-2 rounded-xl bg-white/[0.04] hover:bg-white/10 border border-white/10 text-[11px] font-medium text-cyan-300 transition-colors"
+              >
+                Show more ({filteredItems.length - visibleLimit} remaining)
+              </button>
+            )}
+          </>
         )}
       </div>
     </aside>

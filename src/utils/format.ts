@@ -73,6 +73,37 @@ export function formatDateKey(ms: number): string {
   return `${y}-${m}-${day}`;
 }
 
+export function formatDateKeyLabel(dateKey: string): string {
+  const parts = dateKey.split('-');
+  if (parts.length !== 3) return dateKey;
+  const y = Number(parts[0]);
+  const m = Number(parts[1]);
+  const d = Number(parts[2]);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) {
+    return dateKey;
+  }
+  const local = new Date(y, m - 1, d);
+  return local.toLocaleDateString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+export function formatYearMonthLabel(yearMonth: string): string {
+  const parts = yearMonth.split('-');
+  if (parts.length !== 2) return yearMonth;
+  const y = Number(parts[0]);
+  const m = Number(parts[1]);
+  if (!Number.isFinite(y) || !Number.isFinite(m)) return yearMonth;
+  const local = new Date(y, m - 1, 1);
+  return local.toLocaleDateString(undefined, {
+    month: 'short',
+    year: 'numeric',
+  });
+}
+
 export function formatSpeed(kmh: number): string {
   if (!Number.isFinite(kmh) || kmh < 0.5) return '0';
   if (kmh < 10) return kmh.toFixed(1);

@@ -99,7 +99,8 @@ export function PlaybackDock({
 
   return (
     <div
-      className={`fixed bottom-3 right-3 z-20 flex justify-center pointer-events-none transition-all ${
+      style={{ bottom: 'max(env(safe-area-inset-bottom, 0px), 12px)' }}
+      className={`fixed right-3 z-20 flex justify-center pointer-events-none transition-all ${
         sidebarOpen ? 'left-3 md:left-[356px]' : 'left-3'
       }`}
     >

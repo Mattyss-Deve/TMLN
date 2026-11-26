@@ -4,19 +4,20 @@ A privacy-first, 100% client-side web application, installable PWA, and Capacito
 
 ## Features
 
-- **Multi-Schema Web Worker Parser (`src/workers/timelineParser.ts`)**
-  - **New On-Device `Timeline.json`** (`semanticSegments`, `timelinePath`, `visit`, `activity`)
+- **Multi-Schema Web Worker Parser & Lazy Indexing (`src/workers/timelineParser.ts`, `src/workers/timeline.worker.ts`)**
+  - **New On-Device `Timeline.json`** (`semanticSegments`, `timelinePath`, `visit`, `activity`, degree-formatted coordinates, `hierarchyLevel` deduplication, stationary jitter filtering, and `distanceMeters` fidelity)
   - **Classic Semantic Location History** (`timelineObjects`, `activitySegment`, `placeVisit`, E7 coordinates)
   - **Raw `Records.json`** (`locations` array with dwell clustering and activity inference)
-  - Offloaded to a dedicated Web Worker (`src/workers/timeline.worker.ts`) with progress reporting and >1,200 km/h GPS spike filtering.
+  - Keeps 40MB+ parsed trips cached inside the Web Worker, transferring only lightweight day/journey summaries to the UI and loading full waypoints lazily on selection.
 - **60fps WebGL Map Engine (`src/engine/animationController.ts` & `src/components/MapCanvas.tsx`)**
   - Smooth timestamp interpolation for coordinates, bearing, speed, and cumulative distance.
   - Low-opacity ghost route, vibrant color-coded glowing active route per transport mode, pulsing directional puck, and interactive Place Visit markers.
   - Three camera modes: **Chase** (`50°` pitch, speed-adaptive zoom, heading alignment), **Overview**, and **Free** with one-click **Re-center**.
 - **Built-in Multi-Modal Sample Journey (`src/data/sampleJourney.ts`)**
   - Realistic Bay Area & Pacific Coast multi-day dataset covering walking, rail transit, driving, cycling, flight, and timed landmark visits.
-- **Obsidian Glassmorphic HUD**
-  - Collapsible Trip Explorer (`TripSidebar`), live Telemetry HUD (`TelemetryHUD`), and Media Playback Dock (`PlaybackDock`) with real-time multipliers (`1x`–`300x`) and normalized fit presets (`Fit 15s`, `Fit 30s`, `Fit 60s`).
+- **Obsidian Glassmorphic HUD & Android Safe-Area Support**
+  - Collapsible Trip Explorer (`TripSidebar`) with **By Day** / **Individual Journeys** toggle, Year/Month dropdown, date picker, and search.
+  - Safe-area-aware top HUD (`TelemetryHUD`), camera switcher, and Media Playback Dock (`PlaybackDock`) with real-time multipliers (`1x`–`300x`) and normalized fit presets (`Fit 15s`, `Fit 30s`, `Fit 60s`).
 - **Installable PWA & Capacitor Android App**
   - PWA manifest (`public/manifest.webmanifest`), PNG/SVG icons (`public/icons/`), and Service Worker (`public/sw.js`).
   - Native Android Capacitor wrapper (`android/`, app ID `com.chronomap.app`, `INTERNET` permission enabled in `android/app/src/main/AndroidManifest.xml`).

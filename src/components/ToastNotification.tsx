@@ -11,7 +11,8 @@ export function ToastNotification({ toasts, onDismiss }: ToastNotificationProps)
 
   return (
     <div
-      className="fixed top-16 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 w-[min(92vw,420px)] pointer-events-none"
+      style={{ top: 'calc(env(safe-area-inset-top, 28px) + 56px)' }}
+      className="fixed left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 w-[min(92vw,420px)] pointer-events-none"
       role="status"
       aria-live="polite"
     >

@@ -1,14 +1,16 @@
 import type {
-  DayGroup,
   ParsedTimelineResult,
   PlaceVisit,
   TimelineSchemaFormat,
+  TimelineSummaryIndex,
+  TimelineViewMode,
   TransportMode,
   Trip,
   TripSegment,
+  TripSummary,
   Waypoint,
 } from '../types/timeline';
-import { formatDate, formatDateKey } from '../utils/format';
+import { formatDateKey, formatDateKeyLabel } from '../utils/format';
 import {
   computeBearing,
   computeBounds,
@@ -27,7 +29,8 @@ export class TimelineParseError extends Error {
 export type ProgressCallback = (percent: number, stage: string) => void;
 
 const MAX_GROUND_SPEED_KMH = 1200;
-const TRIP_GAP_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
+const JOURNEY_GAP_THRESHOLD_MS = 45 * 60 * 1000; // 45 minutes
+const JOURNEY_VISIT_SPLIT_MS = 45 * 60 * 1000; // 45 minutes
 const DAY_CROSS_GAP_MS = 15 * 60 * 1000; // 15 minutes
 const RAW_DWELL_MIN_MS = 3 * 60 * 1000; // 3 minutes
 const RAW_DWELL_RADIUS_M = 60;
@@ -41,11 +44,33 @@ interface RawPoint {
   speedKmh?: number;
 }
 
+interface ExtractedVisit {
+  startTimeMs: number;
+  endTimeMs: number;
+  localDateKey: string;
+  name: string;
+  address?: string;
+  semanticType?: string;
+  lat: number;
+  lng: number;
+}
+
+interface ExtractedActivity {
+  startTimeMs: number;
+  endTimeMs: number;
+  localDateKey: string;
+  mode: TransportMode;
+  startCoord: { lat: number; lng: number } | null;
+  endCoord: { lat: number; lng: number } | null;
+  distanceMeters?: number;
+}
+
 interface RawSegmentDraft {
   kind: 'ACTIVITY' | 'VISIT';
   mode: TransportMode;
   startTimeMs: number;
   endTimeMs: number;
+  localDateKey: string;
   points: RawPoint[];
   visit?: {
     name: string;
@@ -75,9 +100,25 @@ function parseTimestampMs(value: unknown): number | null {
 }
 
 /**
+ * Extract the calendar date YYYY-MM-DD in the timestamp's original local offset
+ * (e.g. "2024-06-15T23:45:00.000+02:00" -> "2024-06-15"), falling back to device local date.
+ */
+export function extractLocalDateKey(rawTimestamp: unknown, fallbackMs: number): string {
+  if (typeof rawTimestamp === 'string') {
+    const match = rawTimestamp
+      .trim()
+      .match(/^(\d{4}-\d{2}-\d{2})T.*[+-]\d{2}:?\d{2}$/);
+    if (match) {
+      return match[1];
+    }
+  }
+  return formatDateKey(fallbackMs);
+}
+
+/**
  * Parse Google geo coordinates from strings like:
+ * - "50.1254943°, 14.4973446°"
  * - "geo:37.7955,-122.3937"
- * - "37.7955°, -122.3937°"
  * - "37.7955, -122.3937"
  */
 export function parseGeoString(value: unknown): { lat: number; lng: number } | null {
@@ -190,13 +231,37 @@ function inferModeFromSpeed(speedKmh: number): TransportMode {
   return 'FLYING';
 }
 
-function formatSemanticType(raw?: unknown): string {
-  if (typeof raw !== 'string' || !raw.trim()) return 'Visited Place';
-  const cleaned = raw
+export function mapVisitSemanticType(raw?: unknown): string {
+  if (typeof raw !== 'string') return 'Stop';
+  const upper = raw.trim().toUpperCase();
+  if (!upper || upper === 'UNKNOWN' || upper === 'TYPE_UNKNOWN') {
+    return 'Stop';
+  }
+  if (upper === 'INFERRED_HOME' || upper === 'HOME') {
+    return 'Home';
+  }
+  if (upper === 'INFERRED_WORK' || upper === 'WORK') {
+    return 'Work';
+  }
+  if (upper === 'SEARCHED_ADDRESS') {
+    return 'Pinned Place';
+  }
+
+  const cleaned = upper
     .replace(/^INFERRED_/, '')
     .replace(/_/g, ' ')
     .toLowerCase();
   return cleaned.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function isHomeOrWorkVisit(visit?: { name?: string; semanticType?: string }): boolean {
+  if (!visit) return false;
+  const st = (visit.semanticType ?? '').trim().toUpperCase();
+  if (st === 'INFERRED_HOME' || st === 'HOME' || st === 'INFERRED_WORK' || st === 'WORK') {
+    return true;
+  }
+  const n = (visit.name ?? '').trim();
+  return n === 'Home' || n === 'Work';
 }
 
 /**
@@ -232,13 +297,16 @@ function filterGpsSpikes(
     const speedKmh = (distM / 1000) / dtHours;
 
     if (effectiveMode !== 'FLYING' && speedKmh > MAX_GROUND_SPEED_KMH) {
-      // Check if previous accepted point was actually the single outlier when at index 1
       if (cleaned.length === 1 && i + 1 < points.length) {
         const next = points[i + 1];
         const nextDtHours = Math.max(next.timestampMs - curr.timestampMs, 500) / 3_600_000;
-        const nextSpeed = (haversineMeters(curr.lat, curr.lng, next.lat, next.lng) / 1000) / nextDtHours;
-        const prevToNextDtHours = Math.max(next.timestampMs - prev.timestampMs, 500) / 3_600_000;
-        const prevToNextSpeed = (haversineMeters(prev.lat, prev.lng, next.lat, next.lng) / 1000) / prevToNextDtHours;
+        const nextSpeed =
+          (haversineMeters(curr.lat, curr.lng, next.lat, next.lng) / 1000) / nextDtHours;
+        const prevToNextDtHours =
+          Math.max(next.timestampMs - prev.timestampMs, 500) / 3_600_000;
+        const prevToNextSpeed =
+          (haversineMeters(prev.lat, prev.lng, next.lat, next.lng) / 1000) /
+          prevToNextDtHours;
         if (nextSpeed <= MAX_GROUND_SPEED_KMH && prevToNextSpeed > MAX_GROUND_SPEED_KMH) {
           cleaned[0] = curr;
           filteredSpikes++;
@@ -249,7 +317,6 @@ function filterGpsSpikes(
       continue;
     }
 
-    // Even for FLYING, discard instantaneous micro-glitches (> 2000 km/h over < 2s)
     if (effectiveMode === 'FLYING' && dtMs < 2000 && distM > 1200) {
       filteredSpikes++;
       continue;
@@ -300,33 +367,108 @@ function binarySearchLower(points: RawPoint[], targetTimeMs: number): number {
 }
 
 /**
+ * Deduplicate overlapping hierarchyLevel=0 visits sorted chronologically.
+ */
+function deduplicateVisits(sortedVisits: ExtractedVisit[]): ExtractedVisit[] {
+  if (sortedVisits.length <= 1) return sortedVisits;
+
+  const result: ExtractedVisit[] = [];
+  for (const v of sortedVisits) {
+    const prev = result[result.length - 1];
+    if (!prev) {
+      result.push(v);
+      continue;
+    }
+
+    const overlapStart = Math.max(prev.startTimeMs, v.startTimeMs);
+    const overlapEnd = Math.min(prev.endTimeMs, v.endTimeMs);
+    const overlapMs = Math.max(0, overlapEnd - overlapStart);
+    const minDur = Math.max(
+      1,
+      Math.min(prev.endTimeMs - prev.startTimeMs, v.endTimeMs - v.startTimeMs)
+    );
+    const dist = haversineMeters(prev.lat, prev.lng, v.lat, v.lng);
+
+    if (overlapMs / minDur > 0.65 && dist < 120) {
+      // Keep the longer / better-named visit
+      const prevGeneric = prev.name === 'Stop' || prev.name === 'Pinned Place';
+      const currGeneric = v.name === 'Stop' || v.name === 'Pinned Place';
+      if (
+        (prevGeneric && !currGeneric) ||
+        (prevGeneric === currGeneric &&
+          v.endTimeMs - v.startTimeMs > prev.endTimeMs - prev.startTimeMs)
+      ) {
+        result[result.length - 1] = {
+          ...v,
+          startTimeMs: Math.min(prev.startTimeMs, v.startTimeMs),
+          endTimeMs: Math.max(prev.endTimeMs, v.endTimeMs),
+        };
+      } else {
+        prev.startTimeMs = Math.min(prev.startTimeMs, v.startTimeMs);
+        prev.endTimeMs = Math.max(prev.endTimeMs, v.endTimeMs);
+      }
+      continue;
+    }
+
+    result.push(v);
+  }
+  return result;
+}
+
+/**
+ * O(log V) check whether a timelinePath timestamp falls inside a stationary visit window.
+ */
+function isStrictlyInsideAnyVisit(
+  tsMs: number,
+  visits: ExtractedVisit[]
+): boolean {
+  if (visits.length === 0) return false;
+  let lo = 0;
+  let hi = visits.length - 1;
+  let candidate = -1;
+
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (visits[mid].startTimeMs < tsMs) {
+      candidate = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  for (let i = candidate; i >= 0 && i >= candidate - 2; i--) {
+    const v = visits[i];
+    if (tsMs > v.startTimeMs + 1000 && tsMs < v.endTimeMs - 1000) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Schema 1: New On-Device Timeline.json (`semanticSegments`)
+ * Extracts visits, activities, and timelinePath into three separate arrays,
+ * drops nested hierarchyLevel > 0 visits, discards stationary jitter inside visits,
+ * and reconciles timelinePath strictly inside each activity's [startTime, endTime].
  */
 function parseOnDeviceTimeline(
   semanticSegments: unknown[],
   onProgress?: ProgressCallback
 ): { drafts: RawSegmentDraft[]; filteredSpikes: number; inputCount: number } {
-  const pathPoints: RawPoint[] = [];
-  const drafts: RawSegmentDraft[] = [];
+  const extractedVisits: ExtractedVisit[] = [];
+  const extractedActivities: ExtractedActivity[] = [];
+  const extractedPathPoints: RawPoint[] = [];
   let filteredSpikes = 0;
 
-  onProgress?.(12, 'Extracting semantic segments & paths...');
-
-  interface PendingActivity {
-    startTimeMs: number;
-    endTimeMs: number;
-    mode: TransportMode;
-    startCoord: { lat: number; lng: number } | null;
-    endCoord: { lat: number; lng: number } | null;
-    distanceMeters?: number;
-    localPoints: RawPoint[];
-  }
-
-  const pendingActivities: PendingActivity[] = [];
+  onProgress?.(12, 'Extracting visits, activities, and GPS paths...');
 
   for (let i = 0; i < semanticSegments.length; i++) {
     if (i % 5000 === 0 && semanticSegments.length > 5000) {
-      onProgress?.(12 + Math.round((i / semanticSegments.length) * 38), 'Reading timeline segments...');
+      onProgress?.(
+        12 + Math.round((i / semanticSegments.length) * 38),
+        `Reading semantic segments (${i.toLocaleString()} / ${semanticSegments.length.toLocaleString()})...`
+      );
     }
 
     const seg = semanticSegments[i];
@@ -336,63 +478,76 @@ function parseOnDeviceTimeline(
     const segStart = parseTimestampMs(rec.startTime);
     const segEnd = parseTimestampMs(rec.endTime);
 
-    const localPath: RawPoint[] = [];
+    // 1. Collect timelinePath points separately (never merge directly as legs)
     if (Array.isArray(rec.timelinePath)) {
       for (const item of rec.timelinePath) {
         if (!item || typeof item !== 'object') continue;
         const pRec = item as Record<string, unknown>;
         const coord = parseGeoString(pRec.point) ?? parseLatLngObject(pRec);
-        const ts = parseTimestampMs(pRec.time ?? pRec.timestamp);
+        let ts = parseTimestampMs(pRec.time ?? pRec.timestamp);
+        if (
+          ts === null &&
+          segStart !== null &&
+          pRec.durationMinutesOffsetFromStartTime !== undefined
+        ) {
+          const offsetMin = Number(pRec.durationMinutesOffsetFromStartTime);
+          if (Number.isFinite(offsetMin)) {
+            ts = segStart + offsetMin * 60_000;
+          }
+        }
         if (coord && ts !== null) {
-          const pt: RawPoint = { lat: coord.lat, lng: coord.lng, timestampMs: ts };
-          localPath.push(pt);
-          pathPoints.push(pt);
+          extractedPathPoints.push({
+            lat: coord.lat,
+            lng: coord.lng,
+            timestampMs: ts,
+          });
         }
       }
     }
 
+    // 2. Collect top-level visits (hierarchyLevel === 0) separately
     if (rec.visit && typeof rec.visit === 'object') {
       const visitObj = rec.visit as Record<string, unknown>;
-      const top =
-        visitObj.topCandidate && typeof visitObj.topCandidate === 'object'
-          ? (visitObj.topCandidate as Record<string, unknown>)
-          : visitObj;
-      const coord =
-        parseLatLngObject(top.placeLocation) ??
-        parseGeoString(top.placeLocation) ??
-        parseLatLngObject(visitObj.placeLocation);
+      const hierarchyLevel =
+        typeof visitObj.hierarchyLevel === 'number' ? visitObj.hierarchyLevel : 0;
 
-      if (coord && segStart !== null) {
-        const endMs = segEnd !== null && segEnd >= segStart ? segEnd : segStart + 60_000;
-        const name =
-          (typeof top.placeName === 'string' && top.placeName.trim()) ||
-          (typeof top.name === 'string' && top.name.trim()) ||
-          (typeof visitObj.placeName === 'string' && visitObj.placeName.trim()) ||
-          formatSemanticType(top.semanticType);
-        const address = typeof top.address === 'string' ? top.address : undefined;
-        const semanticType =
-          typeof top.semanticType === 'string' ? top.semanticType : undefined;
+      if (hierarchyLevel <= 0 && segStart !== null) {
+        const top =
+          visitObj.topCandidate && typeof visitObj.topCandidate === 'object'
+            ? (visitObj.topCandidate as Record<string, unknown>)
+            : visitObj;
+        const coord =
+          parseLatLngObject(top.placeLocation) ??
+          parseGeoString(top.placeLocation) ??
+          parseLatLngObject(visitObj.placeLocation);
 
-        drafts.push({
-          kind: 'VISIT',
-          mode: 'STILL',
-          startTimeMs: segStart,
-          endTimeMs: endMs,
-          points: [
-            { lat: coord.lat, lng: coord.lng, timestampMs: segStart, mode: 'STILL' },
-            { lat: coord.lat, lng: coord.lng, timestampMs: endMs, mode: 'STILL' },
-          ],
-          visit: {
+        if (coord) {
+          const endMs = segEnd !== null && segEnd >= segStart ? segEnd : segStart + 60_000;
+          const semanticType =
+            typeof top.semanticType === 'string' ? top.semanticType : undefined;
+          const explicitName =
+            (typeof top.placeName === 'string' && top.placeName.trim()) ||
+            (typeof top.name === 'string' && top.name.trim()) ||
+            (typeof visitObj.placeName === 'string' && visitObj.placeName.trim()) ||
+            '';
+          const name = explicitName || mapVisitSemanticType(semanticType);
+          const address = typeof top.address === 'string' ? top.address : undefined;
+
+          extractedVisits.push({
+            startTimeMs: segStart,
+            endTimeMs: endMs,
+            localDateKey: extractLocalDateKey(rec.startTime, segStart),
             name,
             address,
             semanticType,
             lat: coord.lat,
             lng: coord.lng,
-          },
-        });
+          });
+        }
       }
     }
 
+    // 3. Collect activities separately
     if (rec.activity && typeof rec.activity === 'object') {
       const act = rec.activity as Record<string, unknown>;
       const top =
@@ -413,38 +568,74 @@ function parseOnDeviceTimeline(
               : 0;
         const durationHours = Math.max(endMs - startMs, 1000) / 3_600_000;
         const avgSpeed = (distanceMeters / 1000) / durationHours;
-        const mode = normalizeTransportMode(top.type ?? act.type) ?? inferModeFromSpeed(avgSpeed);
+        const mode =
+          normalizeTransportMode(top.type ?? act.type) ?? inferModeFromSpeed(avgSpeed);
 
-        pendingActivities.push({
+        extractedActivities.push({
           startTimeMs: startMs,
           endTimeMs: endMs,
+          localDateKey: extractLocalDateKey(rec.startTime, startMs),
           mode,
           startCoord,
           endCoord,
           distanceMeters:
-            typeof act.distanceMeters === 'number' ? act.distanceMeters : undefined,
-          localPoints: localPath,
+            typeof act.distanceMeters === 'number' && Number.isFinite(act.distanceMeters)
+              ? act.distanceMeters
+              : undefined,
         });
       }
     }
   }
 
-  onProgress?.(55, 'Correlating GPS paths with activities...');
+  onProgress?.(54, 'Reconciling activities with GPS paths...');
 
-  pathPoints.sort((a, b) => a.timestampMs - b.timestampMs);
-  const usedPathMask = new Uint8Array(pathPoints.length);
+  extractedVisits.sort((a, b) => a.startTimeMs - b.startTimeMs);
+  const visits = deduplicateVisits(extractedVisits);
+  extractedPathPoints.sort((a, b) => a.timestampMs - b.timestampMs);
 
-  for (const act of pendingActivities) {
+  const drafts: RawSegmentDraft[] = [];
+
+  for (const v of visits) {
+    drafts.push({
+      kind: 'VISIT',
+      mode: 'STILL',
+      startTimeMs: v.startTimeMs,
+      endTimeMs: v.endTimeMs,
+      localDateKey: v.localDateKey,
+      points: [
+        { lat: v.lat, lng: v.lng, timestampMs: v.startTimeMs, mode: 'STILL' },
+        { lat: v.lat, lng: v.lng, timestampMs: v.endTimeMs, mode: 'STILL' },
+      ],
+      visit: {
+        name: v.name,
+        address: v.address,
+        semanticType: v.semanticType,
+        lat: v.lat,
+        lng: v.lng,
+      },
+    });
+  }
+
+  for (let aIdx = 0; aIdx < extractedActivities.length; aIdx++) {
+    if (aIdx % 2500 === 0 && extractedActivities.length > 2500) {
+      onProgress?.(
+        54 + Math.round((aIdx / extractedActivities.length) * 20),
+        'Attaching GPS trails to activities...'
+      );
+    }
+
+    const act = extractedActivities[aIdx];
     let pts: RawPoint[] = [];
 
-    if (act.localPoints.length > 0) {
-      pts = act.localPoints.map((p) => ({ ...p, mode: act.mode }));
-    } else if (pathPoints.length > 0) {
-      const startIdx = binarySearchLower(pathPoints, act.startTimeMs - 1000);
-      for (let idx = startIdx; idx < pathPoints.length; idx++) {
-        const p = pathPoints[idx];
-        if (p.timestampMs > act.endTimeMs + 1000) break;
-        usedPathMask[idx] = 1;
+    if (extractedPathPoints.length > 0) {
+      const startIdx = binarySearchLower(extractedPathPoints, act.startTimeMs);
+      for (let idx = startIdx; idx < extractedPathPoints.length; idx++) {
+        const p = extractedPathPoints[idx];
+        if (p.timestampMs > act.endTimeMs) break;
+        // Discard stationary GPS jitter points falling strictly inside any visit window
+        if (isStrictlyInsideAnyVisit(p.timestampMs, visits)) {
+          continue;
+        }
         pts.push({ ...p, mode: act.mode });
       }
     }
@@ -452,8 +643,9 @@ function parseOnDeviceTimeline(
     if (act.startCoord) {
       if (
         pts.length === 0 ||
-        pts[0].timestampMs - act.startTimeMs > 15_000 ||
-        haversineMeters(pts[0].lat, pts[0].lng, act.startCoord.lat, act.startCoord.lng) > 80
+        pts[0].timestampMs - act.startTimeMs > 10_000 ||
+        haversineMeters(pts[0].lat, pts[0].lng, act.startCoord.lat, act.startCoord.lng) >
+          50
       ) {
         pts.unshift({
           lat: act.startCoord.lat,
@@ -468,8 +660,8 @@ function parseOnDeviceTimeline(
       const last = pts[pts.length - 1];
       if (
         !last ||
-        act.endTimeMs - last.timestampMs > 15_000 ||
-        haversineMeters(last.lat, last.lng, act.endCoord.lat, act.endCoord.lng) > 80
+        act.endTimeMs - last.timestampMs > 10_000 ||
+        haversineMeters(last.lat, last.lng, act.endCoord.lat, act.endCoord.lng) > 50
       ) {
         pts.push({
           lat: act.endCoord.lat,
@@ -499,6 +691,7 @@ function parseOnDeviceTimeline(
           mode: act.mode,
           startTimeMs: act.startTimeMs,
           endTimeMs: act.endTimeMs,
+          localDateKey: act.localDateKey,
           points: spikeRes.cleaned,
           explicitDistanceM: act.distanceMeters,
         });
@@ -506,29 +699,15 @@ function parseOnDeviceTimeline(
     }
   }
 
-  // Handle standalone timelinePath points not claimed by any activity or visit
-  if (pathPoints.length > 0 && pendingActivities.length === 0 && drafts.length === 0) {
-    const rawRes = segmentRawLocationPoints(pathPoints, onProgress);
+  // Only fall back to raw path segmentation when there are zero visits AND zero activities
+  if (
+    extractedVisits.length === 0 &&
+    extractedActivities.length === 0 &&
+    extractedPathPoints.length > 0
+  ) {
+    const rawRes = segmentRawLocationPoints(extractedPathPoints, onProgress);
     drafts.push(...rawRes.drafts);
     filteredSpikes += rawRes.filteredSpikes;
-  } else if (pathPoints.length > 0) {
-    // Check if there are substantial unclaimed moving segments
-    const unclaimed: RawPoint[] = [];
-    for (let i = 0; i < pathPoints.length; i++) {
-      if (usedPathMask[i]) continue;
-      const p = pathPoints[i];
-      const insideDraft = drafts.some(
-        (d) => p.timestampMs >= d.startTimeMs - 1000 && p.timestampMs <= d.endTimeMs + 1000
-      );
-      if (!insideDraft) {
-        unclaimed.push(p);
-      }
-    }
-    if (unclaimed.length >= 2) {
-      const extraRes = segmentRawLocationPoints(unclaimed);
-      drafts.push(...extraRes.drafts);
-      filteredSpikes += extraRes.filteredSpikes;
-    }
   }
 
   return {
@@ -572,24 +751,26 @@ function parseSemanticHistory(
         : {}) as Record<string, unknown>;
 
       const coord = parseLatLngObject(loc);
-      const startMs = parseTimestampMs(dur.startTimestamp ?? dur.startTimestampMs);
+      const rawStart = dur.startTimestamp ?? dur.startTimestampMs;
+      const startMs = parseTimestampMs(rawStart);
       const endMs =
         parseTimestampMs(dur.endTimestamp ?? dur.endTimestampMs) ??
         (startMs !== null ? startMs + 60_000 : null);
 
       if (coord && startMs !== null && endMs !== null && endMs >= startMs) {
-        const name =
-          (typeof loc.name === 'string' && loc.name.trim()) ||
-          formatSemanticType(loc.semanticType ?? pv.placeConfidence);
-        const address = typeof loc.address === 'string' ? loc.address : undefined;
         const semanticType =
           typeof loc.semanticType === 'string' ? loc.semanticType : undefined;
+        const name =
+          (typeof loc.name === 'string' && loc.name.trim()) ||
+          mapVisitSemanticType(semanticType ?? pv.placeConfidence);
+        const address = typeof loc.address === 'string' ? loc.address : undefined;
 
         drafts.push({
           kind: 'VISIT',
           mode: 'STILL',
           startTimeMs: startMs,
           endTimeMs: endMs,
+          localDateKey: extractLocalDateKey(rawStart, startMs),
           points: [
             { lat: coord.lat, lng: coord.lng, timestampMs: startMs, mode: 'STILL' },
             { lat: coord.lat, lng: coord.lng, timestampMs: endMs, mode: 'STILL' },
@@ -610,7 +791,8 @@ function parseSemanticHistory(
       const dur = (seg.duration && typeof seg.duration === 'object'
         ? seg.duration
         : {}) as Record<string, unknown>;
-      const startMs = parseTimestampMs(dur.startTimestamp ?? dur.startTimestampMs);
+      const rawStart = dur.startTimestamp ?? dur.startTimestampMs;
+      const startMs = parseTimestampMs(rawStart);
       const endMs =
         parseTimestampMs(dur.endTimestamp ?? dur.endTimestampMs) ??
         (startMs !== null ? startMs + 60_000 : null);
@@ -632,7 +814,6 @@ function parseSemanticHistory(
 
       let pts: RawPoint[] = [];
 
-      // 1. Prefer simplifiedRawPath.points (includes timestamps)
       const simplified = seg.simplifiedRawPath as Record<string, unknown> | undefined;
       if (simplified && Array.isArray(simplified.points)) {
         for (const p of simplified.points) {
@@ -645,7 +826,6 @@ function parseSemanticHistory(
         }
       }
 
-      // 2. Fallback to waypointPath.waypoints or transitPath.transitStops (distribute timestamps by distance)
       if (pts.length === 0) {
         const coords: { lat: number; lng: number }[] = [];
         if (startCoord) coords.push(startCoord);
@@ -694,7 +874,6 @@ function parseSemanticHistory(
         }
       }
 
-      // Ensure start and end anchors
       if (startCoord && pts.length > 0) {
         if (
           pts[0].timestampMs - startMs > 10_000 ||
@@ -736,6 +915,7 @@ function parseSemanticHistory(
             mode,
             startTimeMs: startMs,
             endTimeMs: endMs,
+            localDateKey: extractLocalDateKey(rawStart, startMs),
             points: spikeRes.cleaned,
             explicitDistanceM: typeof seg.distance === 'number' ? seg.distance : undefined,
           });
@@ -776,9 +956,6 @@ function extractRawLocationMode(rec: Record<string, unknown>): TransportMode | u
   return bestType ? normalizeTransportMode(bestType) ?? undefined : undefined;
 }
 
-/**
- * Segment chronological raw GPS points into stationary visits and moving legs.
- */
 function segmentRawLocationPoints(
   rawPoints: RawPoint[],
   onProgress?: ProgressCallback
@@ -796,30 +973,29 @@ function segmentRawLocationPoints(
 
   onProgress?.(60, 'Detecting stays and movement segments...');
 
-  // First compute instantaneous mode for each point
-  const enriched: (RawPoint & { resolvedMode: TransportMode })[] = cleaned.map((pt, idx) => {
-    let speedKmh = pt.speedKmh;
-    if (speedKmh === undefined) {
-      if (idx > 0) {
-        const prev = cleaned[idx - 1];
-        const dtH = Math.max(pt.timestampMs - prev.timestampMs, 1000) / 3_600_000;
-        const distM = haversineMeters(prev.lat, prev.lng, pt.lat, pt.lng);
-        speedKmh = (distM / 1000) / dtH;
-      } else {
-        speedKmh = 0;
+  const enriched: (RawPoint & { resolvedMode: TransportMode })[] = cleaned.map(
+    (pt, idx) => {
+      let speedKmh = pt.speedKmh;
+      if (speedKmh === undefined) {
+        if (idx > 0) {
+          const prev = cleaned[idx - 1];
+          const dtH = Math.max(pt.timestampMs - prev.timestampMs, 1000) / 3_600_000;
+          const distM = haversineMeters(prev.lat, prev.lng, pt.lat, pt.lng);
+          speedKmh = (distM / 1000) / dtH;
+        } else {
+          speedKmh = 0;
+        }
       }
+      const mode = pt.mode ?? inferModeFromSpeed(speedKmh);
+      return { ...pt, speedKmh, resolvedMode: mode };
     }
-    const mode = pt.mode ?? inferModeFromSpeed(speedKmh);
-    return { ...pt, speedKmh, resolvedMode: mode };
-  });
+  );
 
-  // Identify stationary clusters vs moving runs
   const drafts: RawSegmentDraft[] = [];
   let i = 0;
   let stopCounter = 1;
 
   while (i < enriched.length) {
-    // Try to form a stationary dwell starting at i
     let j = i + 1;
     let sumLat = enriched[i].lat;
     let sumLng = enriched[i].lng;
@@ -854,6 +1030,7 @@ function segmentRawLocationPoints(
         mode: 'STILL',
         startTimeMs: startMs,
         endTimeMs: endMs,
+        localDateKey: formatDateKey(startMs),
         points: [
           { lat: centerLat, lng: centerLng, timestampMs: startMs, mode: 'STILL' },
           { lat: centerLat, lng: centerLng, timestampMs: endMs, mode: 'STILL' },
@@ -869,7 +1046,6 @@ function segmentRawLocationPoints(
       continue;
     }
 
-    // Collect a contiguous moving leg of same mode (or until gap / stationary cluster)
     const legStart = i;
     let legEnd = i + 1;
     const legMode =
@@ -881,11 +1057,11 @@ function segmentRawLocationPoints(
       const gap = enriched[legEnd].timestampMs - enriched[legEnd - 1].timestampMs;
       if (gap > RAW_GAP_SPLIT_MS) break;
 
-      // Look ahead to see if a stationary dwell begins here
       let dwellEnd = legEnd + 1;
       while (
         dwellEnd < enriched.length &&
-        enriched[dwellEnd].timestampMs - enriched[dwellEnd - 1].timestampMs <= RAW_GAP_SPLIT_MS &&
+        enriched[dwellEnd].timestampMs - enriched[dwellEnd - 1].timestampMs <=
+          RAW_GAP_SPLIT_MS &&
         haversineMeters(
           enriched[legEnd].lat,
           enriched[legEnd].lng,
@@ -897,14 +1073,14 @@ function segmentRawLocationPoints(
       }
       if (
         dwellEnd - legEnd >= 2 &&
-        enriched[dwellEnd - 1].timestampMs - enriched[legEnd].timestampMs >= RAW_DWELL_MIN_MS
+        enriched[dwellEnd - 1].timestampMs - enriched[legEnd].timestampMs >=
+          RAW_DWELL_MIN_MS
       ) {
         break;
       }
 
       const nextMode = enriched[legEnd].resolvedMode;
       if (nextMode !== 'STILL' && nextMode !== legMode) {
-        // Require at least 2 consecutive points of new mode to switch (prevents 1-point flicker)
         if (
           legEnd + 1 < enriched.length &&
           enriched[legEnd + 1].resolvedMode === nextMode
@@ -923,6 +1099,7 @@ function segmentRawLocationPoints(
         mode: legMode,
         startTimeMs: slice[0].timestampMs,
         endTimeMs: slice[slice.length - 1].timestampMs,
+        localDateKey: formatDateKey(slice[0].timestampMs),
         points: slice.map((p) => ({
           lat: p.lat,
           lng: p.lng,
@@ -937,8 +1114,14 @@ function segmentRawLocationPoints(
         mode: 'STILL',
         startTimeMs: slice[0].timestampMs,
         endTimeMs: slice[0].timestampMs + 60_000,
+        localDateKey: formatDateKey(slice[0].timestampMs),
         points: [
-          { lat: slice[0].lat, lng: slice[0].lng, timestampMs: slice[0].timestampMs, mode: 'STILL' },
+          {
+            lat: slice[0].lat,
+            lng: slice[0].lng,
+            timestampMs: slice[0].timestampMs,
+            mode: 'STILL',
+          },
           {
             lat: slice[0].lat,
             lng: slice[0].lng,
@@ -1014,20 +1197,38 @@ function parseRawRecords(
 function deriveTripTitle(
   visits: PlaceVisit[],
   segments: TripSegment[],
-  startTimeMs: number
+  startTimeMs: number,
+  originBoundaryName?: string,
+  destBoundaryName?: string
 ): string {
-  const namedVisits = visits.filter((v) => v.name && !v.name.startsWith('Stop #'));
-  if (namedVisits.length >= 2) {
-    const first = namedVisits[0].name;
-    const last = namedVisits[namedVisits.length - 1].name;
+  const nonGenericNames: string[] = [];
+  if (originBoundaryName && originBoundaryName !== 'Stop') {
+    nonGenericNames.push(originBoundaryName);
+  }
+  for (const v of visits) {
+    if (v.name && !v.name.startsWith('Stop #') && v.name !== 'Stop') {
+      if (nonGenericNames[nonGenericNames.length - 1] !== v.name) {
+        nonGenericNames.push(v.name);
+      }
+    }
+  }
+  if (destBoundaryName && destBoundaryName !== 'Stop') {
+    if (nonGenericNames[nonGenericNames.length - 1] !== destBoundaryName) {
+      nonGenericNames.push(destBoundaryName);
+    }
+  }
+
+  if (nonGenericNames.length >= 2) {
+    const first = nonGenericNames[0];
+    const last = nonGenericNames[nonGenericNames.length - 1];
     if (first !== last) {
       return `${first} → ${last}`;
     }
     return first;
   }
-  if (namedVisits.length === 1) {
+  if (nonGenericNames.length === 1) {
     const hasMotion = segments.some((s) => s.kind === 'ACTIVITY' && s.distanceM > 100);
-    return hasMotion ? `Trip via ${namedVisits[0].name}` : namedVisits[0].name;
+    return hasMotion ? `Trip via ${nonGenericNames[0]}` : nonGenericNames[0];
   }
 
   const hour = new Date(startTimeMs).getHours();
@@ -1053,6 +1254,379 @@ function deriveTripTitle(
   return `${partOfDay} Journey`;
 }
 
+function buildTripFromDrafts(
+  group: RawSegmentDraft[],
+  tripId: string,
+  dateKey: string,
+  originBoundaryName?: string,
+  destBoundaryName?: string
+): Trip | null {
+  const waypoints: Waypoint[] = [];
+  const segments: TripSegment[] = [];
+  const visits: PlaceVisit[] = [];
+  const modeSet = new Set<TransportMode>();
+
+  let cumDist = 0;
+  let lastTimestamp = -Infinity;
+
+  for (let sIdx = 0; sIdx < group.length; sIdx++) {
+    const draft = group[sIdx];
+    const segStartWpIdx = waypoints.length;
+    const pts = draft.points;
+
+    // Precompute segment-internal raw Haversine lengths so we can align with Google's distanceMeters
+    const rawSegPts: {
+      lat: number;
+      lng: number;
+      ts: number;
+      stepDist: number;
+      speedKmhInput?: number;
+    }[] = [];
+
+    for (let pIdx = 0; pIdx < pts.length; pIdx++) {
+      const pt = pts[pIdx];
+      let ts = pt.timestampMs;
+      if (ts < lastTimestamp) {
+        ts = lastTimestamp;
+      }
+      if (ts === lastTimestamp && (rawSegPts.length > 0 || waypoints.length > 0)) {
+        const ref =
+          rawSegPts.length > 0
+            ? rawSegPts[rawSegPts.length - 1]
+            : waypoints[waypoints.length - 1];
+        const d = haversineMeters(ref.lat, ref.lng, pt.lat, pt.lng);
+        const prevMode =
+          rawSegPts.length > 0 ? draft.mode : waypoints[waypoints.length - 1].mode;
+        if (d < 2 && draft.mode === prevMode) {
+          continue;
+        }
+        ts = lastTimestamp + 1;
+      }
+
+      let stepDist = 0;
+      if (rawSegPts.length > 0) {
+        const prev = rawSegPts[rawSegPts.length - 1];
+        stepDist = haversineMeters(prev.lat, prev.lng, pt.lat, pt.lng);
+      }
+
+      rawSegPts.push({
+        lat: pt.lat,
+        lng: pt.lng,
+        ts,
+        stepDist: draft.kind === 'ACTIVITY' ? stepDist : 0,
+        speedKmhInput: pt.speedKmh,
+      });
+      lastTimestamp = ts;
+    }
+
+    if (rawSegPts.length === 0) {
+      const fallback = pts[0];
+      const ts = Math.max(draft.startTimeMs, lastTimestamp + 1);
+      rawSegPts.push({
+        lat: fallback.lat,
+        lng: fallback.lng,
+        ts,
+        stepDist: 0,
+      });
+      lastTimestamp = ts;
+    }
+
+    const rawSegDistanceM = rawSegPts.reduce((acc, p) => acc + p.stepDist, 0);
+    const hasExplicitDist =
+      draft.kind === 'ACTIVITY' &&
+      typeof draft.explicitDistanceM === 'number' &&
+      Number.isFinite(draft.explicitDistanceM) &&
+      draft.explicitDistanceM > 0;
+
+    const targetSegDistanceM = hasExplicitDist
+      ? draft.explicitDistanceM!
+      : rawSegDistanceM;
+    const distScale =
+      hasExplicitDist && rawSegDistanceM > 1
+        ? draft.explicitDistanceM! / rawSegDistanceM
+        : 1;
+
+    let maxSpeed = 0;
+
+    for (let k = 0; k < rawSegPts.length; k++) {
+      const item = rawSegPts[k];
+      let scaledStep = item.stepDist * distScale;
+      if (hasExplicitDist && rawSegDistanceM <= 1 && k === rawSegPts.length - 1) {
+        scaledStep = draft.explicitDistanceM!;
+      }
+
+      cumDist += scaledStep;
+
+      let speedKmh = 0;
+      let bearing = waypoints.length > 0 ? waypoints[waypoints.length - 1].bearing : 0;
+
+      if (k > 0 && waypoints.length > 0) {
+        const prevWp = waypoints[waypoints.length - 1];
+        const dtMs = item.ts - prevWp.timestampMs;
+        if (draft.kind === 'VISIT' || draft.mode === 'STILL') {
+          speedKmh = 0;
+        } else if (item.speedKmhInput !== undefined) {
+          speedKmh = item.speedKmhInput;
+        } else if (dtMs > 0) {
+          speedKmh = (scaledStep / 1000) / (dtMs / 3_600_000);
+        }
+
+        const geoDist = haversineMeters(prevWp.lat, prevWp.lng, item.lat, item.lng);
+        if (geoDist > 1.5) {
+          bearing = computeBearing(prevWp.lat, prevWp.lng, item.lat, item.lng);
+          if (prevWp.bearing === 0 && waypoints.length === 1) {
+            prevWp.bearing = bearing;
+          }
+        }
+      }
+
+      if (speedKmh > maxSpeed) {
+        maxSpeed = speedKmh;
+      }
+
+      waypoints.push({
+        lat: item.lat,
+        lng: item.lng,
+        timestampMs: item.ts,
+        mode: draft.mode,
+        speedKmh,
+        bearing,
+        cumulativeDistanceM: cumDist,
+      });
+    }
+
+    const segEndWpIdx = waypoints.length - 1;
+    const segStartTime = waypoints[segStartWpIdx].timestampMs;
+    const segEndTime = Math.max(segStartTime, waypoints[segEndWpIdx].timestampMs);
+    const segDuration = Math.max(0, draft.endTimeMs - draft.startTimeMs);
+
+    if (draft.kind === 'ACTIVITY' && segEndWpIdx > segStartWpIdx) {
+      if (waypoints[segStartWpIdx].speedKmh === 0) {
+        waypoints[segStartWpIdx].bearing = waypoints[segStartWpIdx + 1].bearing;
+        waypoints[segStartWpIdx].speedKmh = waypoints[segStartWpIdx + 1].speedKmh * 0.5;
+      }
+      if (segEndWpIdx - segStartWpIdx >= 2) {
+        for (let k = segStartWpIdx + 1; k < segEndWpIdx; k++) {
+          waypoints[k].speedKmh =
+            (waypoints[k - 1].speedKmh +
+              waypoints[k].speedKmh * 2 +
+              waypoints[k + 1].speedKmh) /
+            4;
+        }
+      }
+    }
+
+    const effectiveDist = draft.kind === 'VISIT' ? 0 : targetSegDistanceM;
+    const avgSpeedKmh =
+      draft.kind === 'VISIT' || segDuration <= 0
+        ? 0
+        : (effectiveDist / 1000) / (segDuration / 3_600_000);
+
+    let visitId: string | undefined;
+    if (draft.kind === 'VISIT' && draft.visit) {
+      visitId = `${tripId}-visit-${sIdx}`;
+      visits.push({
+        id: visitId,
+        name: draft.visit.name,
+        address: draft.visit.address,
+        semanticType: draft.visit.semanticType,
+        lat: draft.visit.lat,
+        lng: draft.visit.lng,
+        startTimeMs: draft.startTimeMs,
+        endTimeMs: draft.endTimeMs,
+        dwellDurationMs: Math.max(0, draft.endTimeMs - draft.startTimeMs),
+      });
+    }
+
+    modeSet.add(draft.mode);
+
+    segments.push({
+      id: `${tripId}-seg-${sIdx}`,
+      kind: draft.kind,
+      mode: draft.mode,
+      startTimeMs: segStartTime,
+      endTimeMs: segEndTime,
+      durationMs: Math.max(segDuration, segEndTime - segStartTime),
+      distanceM: effectiveDist,
+      avgSpeedKmh,
+      maxSpeedKmh: Math.max(maxSpeed, avgSpeedKmh),
+      startWaypointIndex: segStartWpIdx,
+      endWaypointIndex: segEndWpIdx,
+      visitId,
+      label: draft.visit ? draft.visit.name : draft.mode,
+    });
+  }
+
+  if (waypoints.length === 1) {
+    const only = waypoints[0];
+    waypoints.push({
+      ...only,
+      timestampMs: only.timestampMs + 60_000,
+    });
+  }
+
+  if (waypoints.length < 2) return null;
+
+  const startTimeMs = waypoints[0].timestampMs;
+  const endTimeMs = waypoints[waypoints.length - 1].timestampMs;
+  const durationMs = Math.max(1000, endTimeMs - startTimeMs);
+  const distanceM = waypoints[waypoints.length - 1].cumulativeDistanceM;
+
+  return {
+    id: tripId,
+    dateKey,
+    title: deriveTripTitle(
+      visits,
+      segments,
+      startTimeMs,
+      originBoundaryName,
+      destBoundaryName
+    ),
+    startTimeMs,
+    endTimeMs,
+    durationMs,
+    distanceM,
+    modes: Array.from(modeSet),
+    waypoints,
+    segments,
+    visits,
+    bounds: computeBounds(waypoints),
+  };
+}
+
+function summarizeTrip(trip: Trip, viewMode: TimelineViewMode): TripSummary {
+  const visitNames: string[] = [];
+  const seen = new Set<string>();
+  for (const v of trip.visits) {
+    if (v.name && !seen.has(v.name)) {
+      seen.add(v.name);
+      visitNames.push(v.name);
+    }
+  }
+  return {
+    id: trip.id,
+    viewMode,
+    dateKey: trip.dateKey,
+    dateLabel: formatDateKeyLabel(trip.dateKey),
+    yearMonth: trip.dateKey.slice(0, 7),
+    title: trip.title,
+    startTimeMs: trip.startTimeMs,
+    endTimeMs: trip.endTimeMs,
+    durationMs: trip.durationMs,
+    distanceM: trip.distanceM,
+    totalDistanceKm: Math.round((trip.distanceM / 1000) * 100) / 100,
+    modes: trip.modes,
+    segmentCount: trip.segments.length,
+    visitCount: trip.visits.length,
+    visitNames,
+  };
+}
+
+function buildIndividualJourneys(sortedDrafts: RawSegmentDraft[]): Trip[] {
+  const hasAnyActivity = sortedDrafts.some((d) => d.kind === 'ACTIVITY');
+
+  if (!hasAnyActivity) {
+    // Visit-only file: return individual stays cleanly
+    const stays: Trip[] = [];
+    sortedDrafts.forEach((draft, idx) => {
+      const trip = buildTripFromDrafts(
+        [draft],
+        `journey-${idx}-${draft.startTimeMs}`,
+        draft.localDateKey
+      );
+      if (trip) stays.push(trip);
+    });
+    return stays;
+  }
+
+  interface JourneyDraftBucket {
+    drafts: RawSegmentDraft[];
+    originBoundaryName?: string;
+    destBoundaryName?: string;
+  }
+
+  const buckets: JourneyDraftBucket[] = [];
+  let current: JourneyDraftBucket | null = null;
+  let lastBoundaryName: string | undefined;
+
+  const flushCurrent = (destName?: string) => {
+    if (!current || current.drafts.length === 0) {
+      current = null;
+      return;
+    }
+    if (destName) {
+      current.destBoundaryName = destName;
+    }
+    buckets.push(current);
+    current = null;
+  };
+
+  for (const draft of sortedDrafts) {
+    const isBoundaryVisit =
+      draft.kind === 'VISIT' &&
+      (isHomeOrWorkVisit(draft.visit) ||
+        draft.endTimeMs - draft.startTimeMs > JOURNEY_VISIT_SPLIT_MS);
+
+    if (isBoundaryVisit) {
+      const boundaryName = draft.visit?.name;
+      if (current) {
+        flushCurrent(boundaryName);
+      }
+      lastBoundaryName = boundaryName;
+      continue;
+    }
+
+    if (!current) {
+      current = {
+        drafts: [draft],
+        originBoundaryName: lastBoundaryName,
+      };
+      lastBoundaryName = undefined;
+      continue;
+    }
+
+    const prev = current.drafts[current.drafts.length - 1];
+    const gap = draft.startTimeMs - prev.endTimeMs;
+    const crossDayGap =
+      draft.localDateKey !== prev.localDateKey && gap > DAY_CROSS_GAP_MS;
+
+    if (gap > JOURNEY_GAP_THRESHOLD_MS || crossDayGap) {
+      flushCurrent();
+      current = {
+        drafts: [draft],
+        originBoundaryName: lastBoundaryName,
+      };
+      lastBoundaryName = undefined;
+    } else {
+      current.drafts.push(draft);
+    }
+  }
+  flushCurrent();
+
+  // Fallback if all drafts were boundary visits without intermediate activities
+  if (buckets.length === 0) {
+    sortedDrafts.forEach((d, idx) => {
+      buckets.push({ drafts: [d], originBoundaryName: d.visit?.name ?? `Stop ${idx + 1}` });
+    });
+  }
+
+  const journeys: Trip[] = [];
+  for (let i = 0; i < buckets.length; i++) {
+    const b = buckets[i];
+    const first = b.drafts[0];
+    const trip = buildTripFromDrafts(
+      b.drafts,
+      `journey-${i}-${first.startTimeMs}`,
+      first.localDateKey,
+      b.originBoundaryName,
+      b.destBoundaryName
+    );
+    if (trip) journeys.push(trip);
+  }
+
+  return journeys;
+}
+
 function finalizeTripsAndDays(
   drafts: RawSegmentDraft[],
   schema: TimelineSchemaFormat,
@@ -1067,296 +1641,81 @@ function finalizeTripsAndDays(
     );
   }
 
-  onProgress?.(78, 'Building trips, velocities, and daily summaries...');
+  onProgress?.(78, 'Building daily timelines & individual journeys...');
 
   const sortedDrafts = [...drafts].sort((a, b) => a.startTimeMs - b.startTimeMs);
 
-  // Group drafts into logical Trips
-  const tripDraftGroups: RawSegmentDraft[][] = [];
-  let currentGroup: RawSegmentDraft[] = [];
-
+  // 1. Group by Local Calendar Day (YYYY-MM-DD)
+  const dayBuckets = new Map<string, RawSegmentDraft[]>();
   for (const draft of sortedDrafts) {
-    if (currentGroup.length === 0) {
-      currentGroup.push(draft);
-      continue;
-    }
-
-    const prev = currentGroup[currentGroup.length - 1];
-    const gap = draft.startTimeMs - prev.endTimeMs;
-    const prevDay = formatDateKey(prev.startTimeMs);
-    const currDay = formatDateKey(draft.startTimeMs);
-
-    if (gap > TRIP_GAP_THRESHOLD_MS || (currDay !== prevDay && gap > DAY_CROSS_GAP_MS)) {
-      tripDraftGroups.push(currentGroup);
-      currentGroup = [draft];
+    const list = dayBuckets.get(draft.localDateKey);
+    if (list) {
+      list.push(draft);
     } else {
-      currentGroup.push(draft);
+      dayBuckets.set(draft.localDateKey, [draft]);
     }
   }
-  if (currentGroup.length > 0) {
-    tripDraftGroups.push(currentGroup);
+
+  const dayTrips: Trip[] = [];
+  const sortedDayKeys = Array.from(dayBuckets.keys()).sort((a, b) => a.localeCompare(b));
+  for (const dateKey of sortedDayKeys) {
+    const dayDrafts = dayBuckets.get(dateKey)!;
+    const dayTrip = buildTripFromDrafts(dayDrafts, `day-${dateKey}`, dateKey);
+    if (dayTrip) {
+      dayTrips.push(dayTrip);
+    }
   }
 
-  const trips: Trip[] = [];
+  // 2. Group into Individual Journeys (split on Home/Work or >45m dwell)
+  const trips = buildIndividualJourneys(sortedDrafts);
+
+  if (dayTrips.length === 0 && trips.length === 0) {
+    throw new TimelineParseError('No valid trips could be constructed from this file.');
+  }
+
+  const yearMonthSet = new Set<string>();
   let totalWaypoints = 0;
   let totalVisits = 0;
   let totalDistanceM = 0;
 
-  for (let tIdx = 0; tIdx < tripDraftGroups.length; tIdx++) {
-    const group = tripDraftGroups[tIdx];
-    const waypoints: Waypoint[] = [];
-    const segments: TripSegment[] = [];
-    const visits: PlaceVisit[] = [];
-    const modeSet = new Set<TransportMode>();
-
-    let cumDist = 0;
-    let lastTimestamp = -Infinity;
-
-    for (let sIdx = 0; sIdx < group.length; sIdx++) {
-      const draft = group[sIdx];
-      const segStartWpIdx = waypoints.length;
-      let segDistanceM = 0;
-      let maxSpeed = 0;
-
-      // Normalize point timestamps monotonically across segments
-      const pts = draft.points;
-      for (let pIdx = 0; pIdx < pts.length; pIdx++) {
-        const pt = pts[pIdx];
-        let ts = pt.timestampMs;
-        if (ts < lastTimestamp) {
-          ts = lastTimestamp;
-        }
-        if (ts === lastTimestamp && waypoints.length > 0) {
-          const prevWp = waypoints[waypoints.length - 1];
-          const d = haversineMeters(prevWp.lat, prevWp.lng, pt.lat, pt.lng);
-          if (d < 2 && pt.mode === prevWp.mode) {
-            continue;
-          }
-          ts = lastTimestamp + 1;
-        }
-
-        let stepDist = 0;
-        let speedKmh = 0;
-        let bearing = waypoints.length > 0 ? waypoints[waypoints.length - 1].bearing : 0;
-
-        if (waypoints.length > 0) {
-          const prevWp = waypoints[waypoints.length - 1];
-          stepDist = haversineMeters(prevWp.lat, prevWp.lng, pt.lat, pt.lng);
-          if (draft.kind === 'ACTIVITY') {
-            segDistanceM += stepDist;
-          }
-          cumDist += stepDist;
-
-          const dtMs = ts - prevWp.timestampMs;
-          if (draft.kind === 'VISIT' || draft.mode === 'STILL') {
-            speedKmh = 0;
-          } else if (pt.speedKmh !== undefined) {
-            speedKmh = pt.speedKmh;
-          } else if (dtMs > 0) {
-            speedKmh = (stepDist / 1000) / (dtMs / 3_600_000);
-          }
-
-          if (stepDist > 1.5) {
-            bearing = computeBearing(prevWp.lat, prevWp.lng, pt.lat, pt.lng);
-            if (prevWp.bearing === 0 && waypoints.length === 1) {
-              prevWp.bearing = bearing;
-            }
-          }
-        }
-
-        if (speedKmh > maxSpeed) {
-          maxSpeed = speedKmh;
-        }
-
-        waypoints.push({
-          lat: pt.lat,
-          lng: pt.lng,
-          timestampMs: ts,
-          mode: draft.mode,
-          speedKmh,
-          bearing,
-          cumulativeDistanceM: cumDist,
-        });
-        lastTimestamp = ts;
-      }
-
-      if (waypoints.length === segStartWpIdx) {
-        // Ensure every segment owns at least one waypoint
-        const fallback = pts[0];
-        const ts = Math.max(draft.startTimeMs, lastTimestamp + 1);
-        waypoints.push({
-          lat: fallback.lat,
-          lng: fallback.lng,
-          timestampMs: ts,
-          mode: draft.mode,
-          speedKmh: 0,
-          bearing: waypoints.length > 0 ? waypoints[waypoints.length - 1].bearing : 0,
-          cumulativeDistanceM: cumDist,
-        });
-        lastTimestamp = ts;
-      }
-
-      const segEndWpIdx = waypoints.length - 1;
-      const segStartTime = waypoints[segStartWpIdx].timestampMs;
-      const segEndTime = Math.max(segStartTime, waypoints[segEndWpIdx].timestampMs);
-      const segDuration = Math.max(0, draft.endTimeMs - draft.startTimeMs);
-
-      // Align departure bearing & smooth speeds inside moving segments
-      if (draft.kind === 'ACTIVITY' && segEndWpIdx > segStartWpIdx) {
-        if (waypoints[segStartWpIdx].speedKmh === 0) {
-          waypoints[segStartWpIdx].bearing = waypoints[segStartWpIdx + 1].bearing;
-          waypoints[segStartWpIdx].speedKmh = waypoints[segStartWpIdx + 1].speedKmh * 0.5;
-        }
-        if (segEndWpIdx - segStartWpIdx >= 2) {
-          for (let k = segStartWpIdx + 1; k < segEndWpIdx; k++) {
-            waypoints[k].speedKmh =
-              (waypoints[k - 1].speedKmh + waypoints[k].speedKmh * 2 + waypoints[k + 1].speedKmh) / 4;
-          }
-        }
-      }
-
-      const effectiveDist =
-        draft.kind === 'VISIT'
-          ? 0
-          : segDistanceM > 0
-            ? segDistanceM
-            : draft.explicitDistanceM ?? 0;
-
-      const avgSpeedKmh =
-        draft.kind === 'VISIT' || segDuration <= 0
-          ? 0
-          : (effectiveDist / 1000) / (segDuration / 3_600_000);
-
-      let visitId: string | undefined;
-      if (draft.kind === 'VISIT' && draft.visit) {
-        visitId = `visit-${tIdx}-${sIdx}`;
-        visits.push({
-          id: visitId,
-          name: draft.visit.name,
-          address: draft.visit.address,
-          semanticType: draft.visit.semanticType,
-          lat: draft.visit.lat,
-          lng: draft.visit.lng,
-          startTimeMs: draft.startTimeMs,
-          endTimeMs: draft.endTimeMs,
-          dwellDurationMs: Math.max(0, draft.endTimeMs - draft.startTimeMs),
-        });
-      }
-
-      modeSet.add(draft.mode);
-
-      segments.push({
-        id: `seg-${tIdx}-${sIdx}`,
-        kind: draft.kind,
-        mode: draft.mode,
-        startTimeMs: segStartTime,
-        endTimeMs: segEndTime,
-        durationMs: Math.max(segDuration, segEndTime - segStartTime),
-        distanceM: effectiveDist,
-        avgSpeedKmh,
-        maxSpeedKmh: Math.max(maxSpeed, avgSpeedKmh),
-        startWaypointIndex: segStartWpIdx,
-        endWaypointIndex: segEndWpIdx,
-        visitId,
-        label: draft.visit ? draft.visit.name : draft.mode,
-      });
-    }
-
-    // Ensure at least 2 waypoints per Trip so interpolation and GeoJSON lines never fail
-    if (waypoints.length === 1) {
-      const only = waypoints[0];
-      waypoints.push({
-        ...only,
-        timestampMs: only.timestampMs + 60_000,
-      });
-    }
-
-    if (waypoints.length < 2) continue;
-
-    const startTimeMs = waypoints[0].timestampMs;
-    const endTimeMs = waypoints[waypoints.length - 1].timestampMs;
-    const durationMs = Math.max(1000, endTimeMs - startTimeMs);
-    const distanceM = waypoints[waypoints.length - 1].cumulativeDistanceM;
-
-    const tripModes = Array.from(modeSet);
-    const trip: Trip = {
-      id: `trip-${tIdx}-${startTimeMs}`,
-      dateKey: formatDateKey(startTimeMs),
-      title: deriveTripTitle(visits, segments, startTimeMs),
-      startTimeMs,
-      endTimeMs,
-      durationMs,
-      distanceM,
-      modes: tripModes,
-      waypoints,
-      segments,
-      visits,
-      bounds: computeBounds(waypoints),
-    };
-
-    trips.push(trip);
-    totalWaypoints += waypoints.length;
-    totalVisits += visits.length;
-    totalDistanceM += distanceM;
+  for (const dt of dayTrips) {
+    yearMonthSet.add(dt.dateKey.slice(0, 7));
+    totalWaypoints += dt.waypoints.length;
+    totalVisits += dt.visits.length;
+    totalDistanceM += dt.distanceM;
+  }
+  for (const t of trips) {
+    yearMonthSet.add(t.dateKey.slice(0, 7));
   }
 
-  if (trips.length === 0) {
-    throw new TimelineParseError('No valid trips could be constructed from this file.');
-  }
+  const yearMonths = Array.from(yearMonthSet).sort((a, b) => b.localeCompare(a));
 
-  // Group Trips into Days
-  const dayMap = new Map<string, Trip[]>();
-  for (const trip of trips) {
-    const list = dayMap.get(trip.dateKey);
-    if (list) {
-      list.push(trip);
-    } else {
-      dayMap.set(trip.dateKey, [trip]);
-    }
-  }
+  const stats = {
+    schema,
+    totalInputRecords: inputCount,
+    totalWaypoints,
+    filteredSpikes,
+    totalTrips: trips.length,
+    totalDays: dayTrips.length,
+    totalVisits,
+    totalDistanceM,
+    parseDurationMs: Math.round(performance.now() - startPerfMs),
+  };
 
-  const days: DayGroup[] = Array.from(dayMap.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([dateKey, dayTrips]) => {
-      const modeSet = new Set<TransportMode>();
-      let dist = 0;
-      let dur = 0;
-      let visitCount = 0;
-      for (const t of dayTrips) {
-        dist += t.distanceM;
-        dur += t.durationMs;
-        visitCount += t.visits.length;
-        for (const m of t.modes) modeSet.add(m);
-      }
-      return {
-        dateKey,
-        dateLabel: formatDate(dayTrips[0].startTimeMs),
-        startTimeMs: dayTrips[0].startTimeMs,
-        endTimeMs: dayTrips[dayTrips.length - 1].endTimeMs,
-        totalDistanceM: dist,
-        totalDurationMs: dur,
-        modes: Array.from(modeSet),
-        tripIds: dayTrips.map((t) => t.id),
-        visitCount,
-      };
-    });
+  const index: TimelineSummaryIndex = {
+    days: dayTrips.map((t) => summarizeTrip(t, 'DAY')),
+    journeys: trips.map((t) => summarizeTrip(t, 'JOURNEY')),
+    yearMonths,
+    stats,
+  };
 
   onProgress?.(100, 'Timeline ready');
 
   return {
+    dayTrips,
     trips,
-    days,
-    stats: {
-      schema,
-      totalInputRecords: inputCount,
-      totalWaypoints,
-      filteredSpikes,
-      totalTrips: trips.length,
-      totalDays: days.length,
-      totalVisits,
-      totalDistanceM,
-      parseDurationMs: Math.round(performance.now() - startPerfMs),
-    },
+    index,
+    stats,
   };
 }
 

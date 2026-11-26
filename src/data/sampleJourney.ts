@@ -147,8 +147,8 @@ export function createSampleTimelineJson(): string {
       'Ferry Building Marketplace',
       'MARKETPLACE',
       { lat: 37.7955, lng: -122.3937 },
-      '2025-10-18T15:30:00.000Z',
-      '2025-10-18T15:48:00.000Z'
+      '2025-10-18T08:30:00.000-07:00',
+      '2025-10-18T08:48:00.000-07:00'
     ),
     buildActivitySegment(
       'WALKING',
@@ -158,8 +158,8 @@ export function createSampleTimelineJson(): string {
         { lat: 37.7937, lng: -122.396 },
         { lat: 37.7929, lng: -122.397 },
       ],
-      '2025-10-18T15:48:00.000Z',
-      '2025-10-18T15:56:00.000Z',
+      '2025-10-18T08:48:00.000-07:00',
+      '2025-10-18T08:56:00.000-07:00',
       5
     ),
     buildActivitySegment(
@@ -174,16 +174,16 @@ export function createSampleTimelineJson(): string {
         { lat: 37.8018, lng: -122.2612 },
         { lat: 37.8048, lng: -122.2584 },
       ],
-      '2025-10-18T15:56:00.000Z',
-      '2025-10-18T16:14:00.000Z',
+      '2025-10-18T08:56:00.000-07:00',
+      '2025-10-18T09:14:00.000-07:00',
       6
     ),
     buildVisitSegment(
       'Lake Merritt Boathouse',
       'PARK',
       { lat: 37.8048, lng: -122.2584 },
-      '2025-10-18T16:14:00.000Z',
-      '2025-10-18T16:38:00.000Z'
+      '2025-10-18T09:14:00.000-07:00',
+      '2025-10-18T09:38:00.000-07:00'
     ),
     buildActivitySegment(
       'IN_PASSENGER_VEHICLE',
@@ -205,16 +205,16 @@ export function createSampleTimelineJson(): string {
         { lat: 37.8294, lng: -122.4926 },
         { lat: 37.827, lng: -122.4994 },
       ],
-      '2025-10-18T16:38:00.000Z',
-      '2025-10-18T17:22:00.000Z',
+      '2025-10-18T09:38:00.000-07:00',
+      '2025-10-18T10:22:00.000-07:00',
       5
     ),
     buildVisitSegment(
       'Marin Headlands Overlook',
       'SCENIC_LOOKOUT',
       { lat: 37.827, lng: -122.4994 },
-      '2025-10-18T17:22:00.000Z',
-      '2025-10-18T17:42:00.000Z'
+      '2025-10-18T10:22:00.000-07:00',
+      '2025-10-18T10:42:00.000-07:00'
     ),
     buildActivitySegment(
       'CYCLING',
@@ -230,16 +230,16 @@ export function createSampleTimelineJson(): string {
         { lat: 37.8812, lng: -122.4718 },
         { lat: 37.8726, lng: -122.4561 },
       ],
-      '2025-10-18T17:42:00.000Z',
-      '2025-10-18T18:10:00.000Z',
+      '2025-10-18T10:42:00.000-07:00',
+      '2025-10-18T11:10:00.000-07:00',
       6
     ),
     buildVisitSegment(
       'Tiburon Shoreline Pier',
       'WATERFRONT',
       { lat: 37.8726, lng: -122.4561 },
-      '2025-10-18T18:10:00.000Z',
-      '2025-10-18T18:40:00.000Z'
+      '2025-10-18T11:10:00.000-07:00',
+      '2025-10-18T11:40:00.000-07:00'
     ),
 
     // --- DAY 2: Coastal Flight & Santa Monica Sunset Walk (2025-10-19) ---
@@ -247,8 +247,8 @@ export function createSampleTimelineJson(): string {
       'San Francisco Intl Airport (SFO)',
       'AIRPORT',
       { lat: 37.6213, lng: -122.379 },
-      '2025-10-19T22:10:00.000Z',
-      '2025-10-19T22:40:00.000Z'
+      '2025-10-19T15:10:00.000-07:00',
+      '2025-10-19T15:40:00.000-07:00'
     ),
     buildActivitySegment(
       'FLYING',
@@ -263,16 +263,16 @@ export function createSampleTimelineJson(): string {
         { lat: 33.99, lng: -118.74 },
         { lat: 33.9416, lng: -118.4085 },
       ],
-      '2025-10-19T22:40:00.000Z',
-      '2025-10-19T23:48:00.000Z',
+      '2025-10-19T15:40:00.000-07:00',
+      '2025-10-19T16:48:00.000-07:00',
       8
     ),
     buildVisitSegment(
       'LAX Terminal 4',
       'AIRPORT',
       { lat: 33.9416, lng: -118.4085 },
-      '2025-10-19T23:48:00.000Z',
-      '2025-10-20T00:05:00.000Z'
+      '2025-10-19T16:48:00.000-07:00',
+      '2025-10-19T17:05:00.000-07:00'
     ),
     buildActivitySegment(
       'IN_PASSENGER_VEHICLE',
@@ -284,16 +284,16 @@ export function createSampleTimelineJson(): string {
         { lat: 34.0038, lng: -118.485 },
         { lat: 34.0092, lng: -118.4976 },
       ],
-      '2025-10-20T00:05:00.000Z',
-      '2025-10-20T00:27:00.000Z',
+      '2025-10-19T17:05:00.000-07:00',
+      '2025-10-19T17:27:00.000-07:00',
       6
     ),
     buildVisitSegment(
       'Santa Monica Pier',
       'LANDMARK',
       { lat: 34.0092, lng: -118.4976 },
-      '2025-10-20T00:27:00.000Z',
-      '2025-10-20T01:02:00.000Z'
+      '2025-10-19T17:27:00.000-07:00',
+      '2025-10-19T18:02:00.000-07:00'
     ),
     buildActivitySegment(
       'WALKING',
@@ -304,8 +304,8 @@ export function createSampleTimelineJson(): string {
         { lat: 33.9908, lng: -118.4755 },
         { lat: 33.9838, lng: -118.4683 },
       ],
-      '2025-10-20T01:02:00.000Z',
-      '2025-10-20T01:26:00.000Z',
+      '2025-10-19T18:02:00.000-07:00',
+      '2025-10-19T18:26:00.000-07:00',
       6
     ),
   ];

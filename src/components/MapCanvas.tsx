@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
-import { Crosshair, Eye, Hand, Navigation2 } from 'lucide-react';
 import type { AnimationController } from '../engine/animationController';
 import type {
   CameraMode,
@@ -19,6 +18,7 @@ interface MapCanvasProps {
   controller: AnimationController;
   trip: Trip | null;
   cameraMode: CameraMode;
+  recenterNonce: number;
   onCameraModeChange: (mode: CameraMode) => void;
   sidebarOpen: boolean;
   onMapError?: (message: string) => void;
@@ -197,6 +197,7 @@ export function MapCanvas({
   controller,
   trip,
   cameraMode,
+  recenterNonce,
   onCameraModeChange,
   sidebarOpen,
   onMapError,
@@ -667,91 +668,20 @@ export function MapCanvas({
   );
 
   const prevCameraModeRef = useRef<CameraMode>(cameraMode);
+  const prevRecenterNonceRef = useRef<number>(recenterNonce);
   useEffect(() => {
-    if (prevCameraModeRef.current !== cameraMode) {
+    const modeChanged = prevCameraModeRef.current !== cameraMode;
+    const recenterTriggered = prevRecenterNonceRef.current !== recenterNonce;
+    if (modeChanged || recenterTriggered) {
       prevCameraModeRef.current = cameraMode;
+      prevRecenterNonceRef.current = recenterNonce;
       applyCameraModeTransition(cameraMode);
     }
-  }, [cameraMode, applyCameraModeTransition]);
-
-  const handleSelectCameraMode = useCallback(
-    (nextMode: CameraMode) => {
-      if (nextMode === cameraModeRef.current) {
-        applyCameraModeTransition(nextMode);
-      } else {
-        onCameraModeChange(nextMode);
-      }
-    },
-    [applyCameraModeTransition, onCameraModeChange]
-  );
+  }, [cameraMode, recenterNonce, applyCameraModeTransition]);
 
   return (
     <div className="relative w-full h-full">
       <div ref={containerRef} className="w-full h-full" />
-
-      {/* Floating Camera Mode Controls (Top-Center in available viewport) */}
-      {trip && (
-        <div
-          className={`fixed top-3 right-3 z-20 flex flex-wrap items-center justify-center gap-2 pointer-events-none transition-all ${
-            sidebarOpen ? 'left-3 md:left-[356px] md:right-[308px]' : 'left-3'
-          }`}
-        >
-          <div className="pointer-events-auto flex items-center p-1 rounded-xl bg-slate-950/80 border border-white/10 backdrop-blur-md shadow-xl">
-            <button
-              type="button"
-              onClick={() => handleSelectCameraMode('CHASE')}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
-                cameraMode === 'CHASE'
-                  ? 'bg-cyan-400/20 text-cyan-200 border border-cyan-400/40'
-                  : 'text-slate-400 hover:text-slate-100 border border-transparent'
-              }`}
-              title="Cinematic 3D Chase camera"
-            >
-              <Navigation2 className="w-3.5 h-3.5" />
-              <span>Chase</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleSelectCameraMode('OVERVIEW')}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
-                cameraMode === 'OVERVIEW'
-                  ? 'bg-cyan-400/20 text-cyan-200 border border-cyan-400/40'
-                  : 'text-slate-400 hover:text-slate-100 border border-transparent'
-              }`}
-              title="Frame entire trip"
-            >
-              <Eye className="w-3.5 h-3.5" />
-              <span>Overview</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleSelectCameraMode('FREE')}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all ${
-                cameraMode === 'FREE'
-                  ? 'bg-cyan-400/20 text-cyan-200 border border-cyan-400/40'
-                  : 'text-slate-400 hover:text-slate-100 border border-transparent'
-              }`}
-              title="Free manual pan/zoom/tilt"
-            >
-              <Hand className="w-3.5 h-3.5" />
-              <span>Free</span>
-            </button>
-          </div>
-
-          {cameraMode === 'FREE' && (
-            <button
-              type="button"
-              onClick={() => handleSelectCameraMode('CHASE')}
-              className="pointer-events-auto flex items-center gap-1.5 px-3 py-2 rounded-xl bg-cyan-400 hover:bg-cyan-300 text-slate-950 font-semibold text-[11px] shadow-lg shadow-cyan-500/30 transition-all"
-            >
-              <Crosshair className="w-3.5 h-3.5" />
-              <span>Re-center</span>
-            </button>
-          )}
-        </div>
-      )}
     </div>
   );
 }
