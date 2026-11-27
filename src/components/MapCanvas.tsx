@@ -14,8 +14,10 @@ import type {
 import { formatDuration } from '../utils/format';
 import { resolveVisitDisplayName } from '../utils/geocoder';
 import { lerp, lerpAngle, MODE_COLORS } from '../utils/geo';
+import { triggerSegmentPulse, triggerSuccessPulse } from '../utils/haptics';
 import { buildLineGradientExpression } from '../utils/lineGradient';
 import { ACCENT_THEMES } from '../utils/settings';
+import { computeSolarAtmosphere, computeSolarPosition } from '../utils/solar';
 
 const CARTO_DARK_STYLE =
   'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
@@ -95,7 +97,10 @@ interface MapCanvasProps {
   heatmapGeoJson: GeoJSON.FeatureCollection | null;
   nicknames: Record<string, string>;
   geocodeCache: Record<string, string>;
+  cinemaMode: boolean;
   mapInstanceRef?: MutableRefObject<maplibregl.Map | null>;
+  onMapSingleTap?: () => void;
+  onMapDoubleTap?: () => void;
   onStagingChange?: (state: CorridorStagingState) => void;
   onMapError?: (message: string) => void;
 }
@@ -199,7 +204,10 @@ export function MapCanvas({
   heatmapGeoJson,
   nicknames,
   geocodeCache,
+  cinemaMode,
   mapInstanceRef,
+  onMapSingleTap,
+  onMapDoubleTap,
   onStagingChange,
   onMapError,
 }: MapCanvasProps) {
@@ -209,6 +217,12 @@ export function MapCanvas({
     mapInstanceRef
   );
   externalMapRef.current = mapInstanceRef;
+  const cinemaModeRef = useRef<boolean>(cinemaMode);
+  cinemaModeRef.current = cinemaMode;
+  const onMapSingleTapRef = useRef(onMapSingleTap);
+  onMapSingleTapRef.current = onMapSingleTap;
+  const onMapDoubleTapRef = useRef(onMapDoubleTap);
+  onMapDoubleTapRef.current = onMapDoubleTap;
   const styleLoadedRef = useRef(false);
   const appliedStyleIdRef = useRef<MapStyleId>(settings.mapStyle);
   const [styleRevision, setStyleRevision] = useState(0);
@@ -255,6 +269,20 @@ export function MapCanvas({
 
   const lastGradientProgressRef = useRef<number>(-1);
   const lastGradientTripIdRef = useRef<string | null>(null);
+
+  const lastSolarUpdateRef = useRef<{
+    tsMs: number;
+    elev: number;
+    az: number;
+    enabled: boolean;
+    style: MapStyleId;
+  } | null>(null);
+
+  const lastHapticRef = useRef<{
+    tripId: string;
+    mode: TransportMode;
+    visitId: string | null;
+  } | null>(null);
 
   const puckRef = useRef<{
     marker: maplibregl.Marker;
@@ -389,21 +417,160 @@ export function MapCanvas({
       // 3. Highlight active place visit marker
       frameVisitHighlight(frame.activeVisit ? frame.activeVisit.id : null);
 
-      // 4. Camera Chase / Drone Chase tracking (paused during corridor pre-staging)
+      // 3b. Mechanical segment / visit arrival haptic pulse during active playback
+      const curVisitId = frame.activeVisit ? frame.activeVisit.id : null;
+      const prevHaptic = lastHapticRef.current;
+      if (prevHaptic && prevHaptic.tripId === frame.tripId && frame.isPlaying) {
+        const modeChanged = prevHaptic.mode !== frame.mode;
+        const arrivedAtVisit = curVisitId !== null && curVisitId !== prevHaptic.visitId;
+        if (modeChanged || arrivedAtVisit) {
+          triggerSegmentPulse();
+        }
+      }
+      lastHapticRef.current = {
+        tripId: frame.tripId,
+        mode: frame.mode,
+        visitId: curVisitId,
+      };
+
+      // 3c. Solar-Synced 3D Directional Lighting, Atmosphere & Night Route Glow Boost
+      const curSettings = settingsRef.current;
+      const nowPerf = performance.now();
+      const prevSolar = lastSolarUpdateRef.current;
+      if (curSettings.solarSync) {
+        const solar = computeSolarPosition(frame.lat, frame.lng, frame.currentTimeMs);
+        const needsSolarUpdate =
+          !prevSolar ||
+          !prevSolar.enabled ||
+          prevSolar.style !== curSettings.mapStyle ||
+          (nowPerf - prevSolar.tsMs >= 240 &&
+            (Math.abs(solar.elevationDeg - prevSolar.elev) >= 0.45 ||
+              Math.abs(solar.azimuthDeg - prevSolar.az) >= 1.2));
+
+        if (needsSolarUpdate) {
+          lastSolarUpdateRef.current = {
+            tsMs: nowPerf,
+            elev: solar.elevationDeg,
+            az: solar.azimuthDeg,
+            enabled: true,
+            style: curSettings.mapStyle,
+          };
+          const atmo = computeSolarAtmosphere(solar, curSettings.mapStyle);
+          try {
+            map.setLight(atmo.light);
+            if (typeof map.setSky === 'function') {
+              map.setSky(atmo.sky);
+            }
+            if (map.getLayer('chronomap-3d-buildings')) {
+              map.setPaintProperty(
+                'chronomap-3d-buildings',
+                'fill-extrusion-color',
+                atmo.buildingColor
+              );
+              map.setPaintProperty(
+                'chronomap-3d-buildings',
+                'fill-extrusion-opacity',
+                atmo.buildingOpacity
+              );
+            }
+            if (map.getLayer('active-route-glow') && curSettings.routeGlow) {
+              map.setPaintProperty(
+                'active-route-glow',
+                'line-opacity',
+                Math.min(0.84, Number((0.5 * atmo.routeGlowOpacityBoost).toFixed(2)))
+              );
+            }
+          } catch {
+            // Ignore transient style-not-ready errors
+          }
+        }
+      } else if (prevSolar?.enabled) {
+        lastSolarUpdateRef.current = {
+          tsMs: nowPerf,
+          elev: 0,
+          az: 0,
+          enabled: false,
+          style: curSettings.mapStyle,
+        };
+        const defaultBuildingColor =
+          curSettings.mapStyle === 'DAYLIGHT'
+            ? '#cbd5e1'
+            : curSettings.mapStyle === 'SATELLITE'
+              ? '#1e293b'
+              : '#162235';
+        try {
+          map.setLight({
+            anchor: 'viewport',
+            color: '#ffffff',
+            intensity: 0.5,
+            position: [1.15, 210, 30],
+          });
+          if (map.getLayer('chronomap-3d-buildings')) {
+            map.setPaintProperty(
+              'chronomap-3d-buildings',
+              'fill-extrusion-color',
+              defaultBuildingColor
+            );
+            map.setPaintProperty(
+              'chronomap-3d-buildings',
+              'fill-extrusion-opacity',
+              curSettings.mapStyle === 'SATELLITE' ? 0.56 : 0.72
+            );
+          }
+          if (map.getLayer('active-route-glow')) {
+            map.setPaintProperty(
+              'active-route-glow',
+              'line-opacity',
+              curSettings.routeGlow ? 0.5 : 0
+            );
+          }
+        } catch {
+          // Ignore transient style errors
+        }
+      }
+
+      // 4. Camera Chase / Drone Chase / Director's Cinema tracking (paused during corridor pre-staging)
       if (isStagingRef.current) return;
 
       const mode = cameraModeRef.current;
-      if (mode === 'CHASE' || mode === 'DRONE') {
+      const inCinemaDirector = cinemaModeRef.current && mode !== 'FREE';
+      if (mode === 'CHASE' || mode === 'DRONE' || inCinemaDirector) {
         const now = performance.now();
         if (now < chaseCameraRef.current.transitionUntilMs) {
           return;
         }
 
-        const isDrone = mode === 'DRONE';
-        const targetZoom = getTargetZoomForFrame(frame, isDrone);
-        const targetBearing =
+        const isDrone = mode === 'DRONE' || inCinemaDirector;
+        const isSlowOrVisit =
+          frame.mode === 'STILL' || frame.mode === 'WALKING' || frame.speedKmh < 8;
+        const isFastTransit =
+          frame.mode === 'TRANSIT' ||
+          frame.mode === 'DRIVING' ||
+          frame.mode === 'FLYING' ||
+          frame.speedKmh >= 25;
+
+        let targetZoom = getTargetZoomForFrame(frame, isDrone);
+        let targetPitch = getCameraPitchForMode(mode, curSettings.enable3D);
+        let targetBearing =
           frame.mode === 'STILL' ? chaseCameraRef.current.bearing : frame.bearing;
-        const targetPitch = getCameraPitchForMode(mode, settingsRef.current.enable3D);
+
+        if (inCinemaDirector) {
+          // Autonomous Director Camera: gentle ±18° sinusoidal bearing drift (~25s period)
+          const driftDeg = Math.sin((now / 25000) * Math.PI * 2) * 18;
+          const baseHeading =
+            frame.mode === 'STILL' ? chaseCameraRef.current.bearing : frame.bearing;
+          targetBearing = (baseHeading + driftDeg + 360) % 360;
+
+          if (isSlowOrVisit) {
+            targetPitch = 58;
+            targetZoom = Math.min(18.2, targetZoom + 0.45);
+          } else if (isFastTransit) {
+            targetPitch = 46;
+            targetZoom = Math.max(7.2, targetZoom - 0.35);
+          } else {
+            targetPitch = 52;
+          }
+        }
 
         if (!chaseCameraRef.current.initialized) {
           chaseCameraRef.current.zoom = targetZoom;
@@ -419,13 +586,13 @@ export function MapCanvas({
           chaseCameraRef.current.pitch = lerp(
             chaseCameraRef.current.pitch,
             targetPitch,
-            0.08
+            0.07
           );
-          if (frame.mode !== 'STILL') {
+          if (frame.mode !== 'STILL' || inCinemaDirector) {
             chaseCameraRef.current.bearing = lerpAngle(
               chaseCameraRef.current.bearing,
               targetBearing,
-              isDrone ? 0.12 : 0.07
+              inCinemaDirector ? 0.06 : isDrone ? 0.12 : 0.07
             );
           }
         }
@@ -675,6 +842,7 @@ export function MapCanvas({
 
       lastGradientProgressRef.current = -1;
       lastGradientTripIdRef.current = null;
+      lastSolarUpdateRef.current = null;
       styleLoadedRef.current = true;
       setStyleRevision((r) => r + 1);
     },
@@ -856,6 +1024,7 @@ export function MapCanvas({
             percent: 100,
             label: '',
           });
+          triggerSuccessPulse();
           if (resumePlayback) {
             controller.play();
           }
@@ -1039,16 +1208,20 @@ export function MapCanvas({
       map.setPaintProperty('alltime-heatmap-routes', 'line-color', accent.primary);
     }
 
+    lastSolarUpdateRef.current = null;
     const snap = controller.getSnapshot();
     if (snap) {
+      applyFrameToMap(snap);
       updateGpuRouteProgress(map, snap.tripId, snap.lineProgress, true);
     }
   }, [
     settings.routeWidth,
     settings.routeGlow,
     settings.accentTheme,
+    settings.solarSync,
     styleRevision,
     controller,
+    applyFrameToMap,
     updateGpuRouteProgress,
   ]);
 
@@ -1213,6 +1386,90 @@ export function MapCanvas({
       }
     }
   }, [cameraMode, recenterNonce, snapToActiveViewpoint]);
+
+  // Gesture-safe single-tap & double-tap detection on empty map space
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const activePointers = new Set<number>();
+    let maxPointers = 0;
+    let downX = 0;
+    let downY = 0;
+    let downTime = 0;
+    let ignoredTarget = false;
+    let lastTapTime = 0;
+    let pendingSingleTapTimer: number | null = null;
+
+    const onPointerDown = (e: PointerEvent) => {
+      activePointers.add(e.pointerId);
+      maxPointers = Math.max(maxPointers, activePointers.size);
+      if (activePointers.size === 1) {
+        const targetEl = e.target as HTMLElement | null;
+        ignoredTarget = Boolean(
+          targetEl?.closest('button, a, input, .maplibregl-ctrl-attrib')
+        );
+        downX = e.clientX;
+        downY = e.clientY;
+        downTime = performance.now();
+      }
+    };
+
+    const onPointerUp = (e: PointerEvent) => {
+      activePointers.delete(e.pointerId);
+      if (activePointers.size > 0) return;
+
+      const dist = Math.hypot(e.clientX - downX, e.clientY - downY);
+      const dur = performance.now() - downTime;
+      const wasSingleCleanTap =
+        !ignoredTarget && maxPointers === 1 && dist < 6 && dur < 260;
+
+      maxPointers = 0;
+      if (!wasSingleCleanTap || !tripRef.current) return;
+
+      if (!cinemaModeRef.current) {
+        onMapSingleTapRef.current?.();
+        return;
+      }
+
+      // Inside Cinema Mode: distinguish double-tap (Play/Pause) vs single-tap (Exit)
+      const now = performance.now();
+      if (now - lastTapTime < 260) {
+        if (pendingSingleTapTimer !== null) {
+          window.clearTimeout(pendingSingleTapTimer);
+          pendingSingleTapTimer = null;
+        }
+        lastTapTime = 0;
+        onMapDoubleTapRef.current?.();
+      } else {
+        lastTapTime = now;
+        pendingSingleTapTimer = window.setTimeout(() => {
+          pendingSingleTapTimer = null;
+          onMapSingleTapRef.current?.();
+        }, 250);
+      }
+    };
+
+    const onPointerCancel = (e: PointerEvent) => {
+      activePointers.delete(e.pointerId);
+      if (activePointers.size === 0) {
+        maxPointers = 0;
+      }
+    };
+
+    container.addEventListener('pointerdown', onPointerDown, { passive: true });
+    container.addEventListener('pointerup', onPointerUp, { passive: true });
+    container.addEventListener('pointercancel', onPointerCancel, { passive: true });
+
+    return () => {
+      if (pendingSingleTapTimer !== null) {
+        window.clearTimeout(pendingSingleTapTimer);
+      }
+      container.removeEventListener('pointerdown', onPointerDown);
+      container.removeEventListener('pointerup', onPointerUp);
+      container.removeEventListener('pointercancel', onPointerCancel);
+    };
+  }, []);
 
   return (
     <div className="relative w-full h-full">

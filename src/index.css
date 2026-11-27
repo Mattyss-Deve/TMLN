@@ -112,6 +112,25 @@
   animation: visit-pulse 2s ease-in-out infinite;
 }
 
+@keyframes cinema-pulse {
+  0% {
+    transform: scale(0.84);
+    opacity: 0;
+  }
+  25% {
+    transform: scale(1.04);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1.18);
+    opacity: 0;
+  }
+}
+
+.animate-ping-once {
+  animation: cinema-pulse 0.48s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
 /* MapLibre attribution compact styling */
 .maplibregl-ctrl-attrib {
   background-color: rgba(11, 14, 20, 0.72) !important;

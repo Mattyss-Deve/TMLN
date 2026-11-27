@@ -1,6 +1,6 @@
 import type { AccentThemeId, AppSettings } from '../types/timeline';
 
-export const APP_VERSION = 'v1.2.0';
+export const APP_VERSION = 'v1.3.0';
 
 export interface AccentThemeConfig {
   id: AccentThemeId;
@@ -68,6 +68,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   units: 'METRIC',
   mapStyle: 'DARK',
   enable3D: false,
+  solarSync: true,
+  hapticsEnabled: true,
 };
 
 const STORAGE_KEY = 'chronomap.settings.v1';
@@ -102,6 +104,14 @@ export function loadSettings(): AppSettings {
         : DEFAULT_SETTINGS.mapStyle;
     const enable3D =
       typeof parsed.enable3D === 'boolean' ? parsed.enable3D : DEFAULT_SETTINGS.enable3D;
+    const solarSync =
+      typeof parsed.solarSync === 'boolean'
+        ? parsed.solarSync
+        : DEFAULT_SETTINGS.solarSync;
+    const hapticsEnabled =
+      typeof parsed.hapticsEnabled === 'boolean'
+        ? parsed.hapticsEnabled
+        : DEFAULT_SETTINGS.hapticsEnabled;
 
     return {
       accentTheme,
@@ -110,6 +120,8 @@ export function loadSettings(): AppSettings {
       units,
       mapStyle,
       enable3D,
+      solarSync,
+      hapticsEnabled,
     };
   } catch {
     return DEFAULT_SETTINGS;

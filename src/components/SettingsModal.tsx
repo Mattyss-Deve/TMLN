@@ -165,6 +165,84 @@ export function SettingsModal({
             </div>
           </div>
 
+          {/* Atmosphere & Haptics */}
+          <div className="space-y-2">
+            <div className="text-xs font-medium text-slate-300">
+              Atmosphere &amp; feel
+            </div>
+            <div className="p-3 rounded-lg instrument-inset space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs font-medium text-slate-200">
+                    Solar Sync
+                  </div>
+                  <div className="text-[11px] text-slate-400">
+                    Day/night 3D building shading &amp; sky synced to playback time
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={settings.solarSync}
+                  onClick={() =>
+                    onUpdateSettings({ solarSync: !settings.solarSync })
+                  }
+                  className="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full active:scale-[0.98] transition-colors border"
+                  style={{
+                    backgroundColor: settings.solarSync
+                      ? activeAccent.primary
+                      : 'rgba(30, 41, 59, 0.8)',
+                    borderColor: settings.solarSync
+                      ? activeAccent.border
+                      : 'rgba(255,255,255,0.12)',
+                  }}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      settings.solarSync ? 'translate-x-5' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              <div className="flex items-center justify-between gap-3 pt-2.5 border-t border-white/[0.07]">
+                <div>
+                  <div className="text-xs font-medium text-slate-200">
+                    Tactile Haptics
+                  </div>
+                  <div className="text-[11px] text-slate-400">
+                    Watch-crown scrubber detents &amp; segment transition pulses
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={settings.hapticsEnabled}
+                  onClick={() =>
+                    onUpdateSettings({
+                      hapticsEnabled: !settings.hapticsEnabled,
+                    })
+                  }
+                  className="relative inline-flex h-6 w-11 shrink-0 items-center rounded-full active:scale-[0.98] transition-colors border"
+                  style={{
+                    backgroundColor: settings.hapticsEnabled
+                      ? activeAccent.primary
+                      : 'rgba(30, 41, 59, 0.8)',
+                    borderColor: settings.hapticsEnabled
+                      ? activeAccent.border
+                      : 'rgba(255,255,255,0.12)',
+                  }}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      settings.hapticsEnabled ? 'translate-x-5' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+          </div>
+
           {/* Measurement Units */}
           <div className="space-y-2">
             <div className="text-xs font-medium text-slate-300">Units</div>

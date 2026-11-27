@@ -3,9 +3,11 @@ import type maplibregl from 'maplibre-gl';
 import {
   Box,
   ChevronRight,
+  Clapperboard,
   Compass,
   Crosshair,
   Eye,
+  Film,
   Flame,
   Hand,
   Loader2,
@@ -19,6 +21,7 @@ import {
   Video,
   X,
 } from 'lucide-react';
+import { CinemaOverlay } from './components/CinemaOverlay';
 import { MapCanvas } from './components/MapCanvas';
 import { PlaybackDock } from './components/PlaybackDock';
 import { SettingsModal } from './components/SettingsModal';
@@ -33,6 +36,7 @@ import type {
   CameraMode,
   CorridorStagingState,
   MapStyleId,
+  ReelExportProgress,
   SpeedPreset,
   TelemetryFrame,
   TimelineSummaryIndex,
@@ -47,7 +51,9 @@ import {
   ReverseGeocoderQueue,
   saveNickname,
 } from './utils/geocoder';
+import { setHapticsEnabled, triggerSuccessPulse } from './utils/haptics';
 import { exportRoutePostcard } from './utils/postcard';
+import { exportVideoReel } from './utils/reelExporter';
 import {
   ACCENT_THEMES,
   APP_VERSION,
@@ -93,6 +99,20 @@ export default function App() {
   const [starredIds, setStarredIds] = useState<string[]>(() => loadStarredTripIds());
   const [isExportingPostcard, setIsExportingPostcard] = useState(false);
 
+  const [reelProgress, setReelProgress] = useState<ReelExportProgress>({
+    active: false,
+    percent: 0,
+    frame: 0,
+    totalFrames: 360,
+    stage: '',
+  });
+  const reelAbortRef = useRef<AbortController | null>(null);
+
+  const [cinemaMode, setCinemaMode] = useState(false);
+  const [cinemaPulseIcon, setCinemaPulseIcon] = useState<'play' | 'pause' | null>(null);
+  const cinemaPulseTimerRef = useRef<number | null>(null);
+  const cinemaHistoryPushedRef = useRef(false);
+
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [heatmapGeoJson, setHeatmapGeoJson] =
     useState<GeoJSON.FeatureCollection | null>(null);
@@ -129,6 +149,11 @@ export default function App() {
   const hasAttemptedRestoreRef = useRef(false);
 
   const accent = ACCENT_THEMES[settings.accentTheme];
+
+  // Sync runtime haptics switch with settings
+  useEffect(() => {
+    setHapticsEnabled(settings.hapticsEnabled);
+  }, [settings.hapticsEnabled]);
 
   const handleUpdateSettings = useCallback((patch: Partial<AppSettings>) => {
     setSettings((prev) => {
@@ -168,6 +193,79 @@ export default function App() {
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
+
+  // Cinema Mode enter/exit with Android Back (`popstate`) support
+  const enterCinemaMode = useCallback(() => {
+    if (!activeTrip || reelProgress.active) return;
+    setIsSettingsOpen(false);
+    setIsStatsOpen(false);
+    setCinemaMode(true);
+    if (!cinemaHistoryPushedRef.current && typeof window !== 'undefined') {
+      try {
+        window.history.pushState({ chronomapCinema: true }, '');
+        cinemaHistoryPushedRef.current = true;
+      } catch {
+        // Ignore history restrictions
+      }
+    }
+  }, [activeTrip, reelProgress.active]);
+
+  const exitCinemaMode = useCallback((fromPopState = false) => {
+    setCinemaMode(false);
+    if (!fromPopState && cinemaHistoryPushedRef.current && typeof window !== 'undefined') {
+      cinemaHistoryPushedRef.current = false;
+      try {
+        if (window.history.state?.chronomapCinema) {
+          window.history.back();
+        }
+      } catch {
+        // Ignore history errors
+      }
+    } else if (fromPopState) {
+      cinemaHistoryPushedRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    const onPopState = () => {
+      if (cinemaMode) {
+        exitCinemaMode(true);
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [cinemaMode, exitCinemaMode]);
+
+  const handleCinemaPlayPause = useCallback(() => {
+    const snap = controller.getSnapshot();
+    const willPlay = !(snap?.isPlaying ?? false);
+    controller.togglePlay();
+    setCinemaPulseIcon(willPlay ? 'play' : 'pause');
+    if (cinemaPulseTimerRef.current !== null) {
+      window.clearTimeout(cinemaPulseTimerRef.current);
+    }
+    cinemaPulseTimerRef.current = window.setTimeout(() => {
+      setCinemaPulseIcon(null);
+      cinemaPulseTimerRef.current = null;
+    }, 520);
+  }, [controller]);
+
+  const handleMapSingleTap = useCallback(() => {
+    if (reelProgress.active || isSettingsOpen || isStatsOpen) return;
+    if (cinemaMode) {
+      exitCinemaMode(false);
+    } else if (activeTrip) {
+      enterCinemaMode();
+    }
+  }, [
+    reelProgress.active,
+    isSettingsOpen,
+    isStatsOpen,
+    cinemaMode,
+    activeTrip,
+    enterCinemaMode,
+    exitCinemaMode,
+  ]);
 
   // Initialize rate-limited Nominatim reverse-geocoding queue
   useEffect(() => {
@@ -383,7 +481,7 @@ export default function App() {
   }, [showHeatmap, heatmapGeoJson, getHeatmap, pushToast]);
 
   const handleExportPostcard = useCallback(async () => {
-    if (!activeTrip || isExportingPostcard) return;
+    if (!activeTrip || isExportingPostcard || reelProgress.active) return;
     const map = mapInstanceRef.current;
     if (!map) {
       pushToast('error', 'Map not ready', 'Wait for the map canvas to finish loading.');
@@ -392,7 +490,6 @@ export default function App() {
 
     setIsExportingPostcard(true);
     try {
-      // Ensure the WebGL drawing buffer has a fresh rendered frame before snapshot
       map.triggerRepaint();
       await new Promise<void>((resolve) => {
         window.requestAnimationFrame(() => resolve());
@@ -406,8 +503,10 @@ export default function App() {
       });
 
       if (outcome === 'shared') {
+        triggerSuccessPulse();
         pushToast('success', 'Route postcard shared', `${activeTrip.title} · 1080×1350`);
       } else if (outcome === 'downloaded') {
+        triggerSuccessPulse();
         pushToast(
           'success',
           'Route postcard saved',
@@ -421,7 +520,116 @@ export default function App() {
     } finally {
       setIsExportingPostcard(false);
     }
-  }, [activeTrip, isExportingPostcard, settings.units, settings.accentTheme, pushToast]);
+  }, [
+    activeTrip,
+    isExportingPostcard,
+    reelProgress.active,
+    settings.units,
+    settings.accentTheme,
+    pushToast,
+  ]);
+
+  const handleCancelReel = useCallback(() => {
+    reelAbortRef.current?.abort();
+  }, []);
+
+  const handleExportReel = useCallback(async () => {
+    if (!activeTrip || reelProgress.active || isExportingPostcard) return;
+    const map = mapInstanceRef.current;
+    if (!map) {
+      pushToast('error', 'Map not ready', 'Wait for the map canvas to finish loading.');
+      return;
+    }
+
+    const abortController = new AbortController();
+    reelAbortRef.current = abortController;
+
+    const prevEnable3D = settings.enable3D;
+    const prevCameraMode = cameraMode;
+    const prevSidebar = sidebarOpen;
+    const prevProgress = controller.getSnapshot()?.progress ?? 0;
+
+    setReelProgress({
+      active: true,
+      percent: 2,
+      frame: 0,
+      totalFrames: 360,
+      stage: 'Preparing 3D Drone Chase view...',
+    });
+
+    // Engage 3D buildings + Drone Chase cleanly for the automated 9:16 sweep
+    if (!prevEnable3D) {
+      handleUpdateSettings({ enable3D: true });
+    }
+    setCameraMode('DRONE');
+    if (prevSidebar) {
+      setSidebarOpen(false);
+    }
+
+    try {
+      // Allow map style / 3D buildings & camera to settle into Drone Chase
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 420));
+
+      const outcome = await exportVideoReel({
+        map,
+        controller,
+        trip: activeTrip,
+        units: settings.units,
+        accentTheme: settings.accentTheme,
+        solarSync: settings.solarSync,
+        signal: abortController.signal,
+        onProgress: setReelProgress,
+      });
+
+      if (outcome === 'shared') {
+        triggerSuccessPulse();
+        pushToast('success', '9:16 Video Reel shared', `${activeTrip.title} · 720×1280`);
+      } else if (outcome === 'downloaded') {
+        triggerSuccessPulse();
+        pushToast(
+          'success',
+          '9:16 Video Reel saved',
+          `Saved chronomap-reel-${activeTrip.dateKey}.webm`
+        );
+      } else {
+        pushToast('info', 'Reel export cancelled');
+      }
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Unable to record 9:16 video reel.';
+      pushToast('error', 'Reel export failed', msg);
+    } finally {
+      reelAbortRef.current = null;
+      setReelProgress({
+        active: false,
+        percent: 0,
+        frame: 0,
+        totalFrames: 360,
+        stage: '',
+      });
+      if (!prevEnable3D) {
+        handleUpdateSettings({ enable3D: false });
+      }
+      setCameraMode(prevCameraMode);
+      if (prevSidebar) {
+        setSidebarOpen(true);
+      }
+      controller.seekToProgress(prevProgress);
+    }
+  }, [
+    activeTrip,
+    reelProgress.active,
+    isExportingPostcard,
+    settings.enable3D,
+    settings.units,
+    settings.accentTheme,
+    settings.solarSync,
+    cameraMode,
+    sidebarOpen,
+    controller,
+    handleUpdateSettings,
+    pushToast,
+  ]);
 
   const handleSelectCameraMode = useCallback((nextMode: CameraMode) => {
     setCameraMode((prev) => {
@@ -469,7 +677,7 @@ export default function App() {
     [pushToast]
   );
 
-  // Keyboard shortcuts: Space (play/pause), Left/Right (step segment), C (cycle camera)
+  // Keyboard shortcuts: Space (play/pause), Left/Right (step), C (camera), Esc (exit cinema)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -483,11 +691,21 @@ export default function App() {
         return;
       }
 
+      if (e.code === 'Escape' && cinemaMode) {
+        e.preventDefault();
+        exitCinemaMode(false);
+        return;
+      }
+
       if (!activeTrip) return;
 
       if (e.code === 'Space') {
         e.preventDefault();
-        controller.togglePlay();
+        if (cinemaMode) {
+          handleCinemaPlayPause();
+        } else {
+          controller.togglePlay();
+        }
       } else if (e.code === 'ArrowLeft') {
         e.preventDefault();
         controller.stepSegment(-1);
@@ -509,7 +727,7 @@ export default function App() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [controller, activeTrip]);
+  }, [controller, activeTrip, cinemaMode, exitCinemaMode, handleCinemaPlayPause]);
 
   const totalBadgeCount = summaryIndex
     ? viewMode === 'DAY'
@@ -555,6 +773,8 @@ export default function App() {
     },
   ];
 
+  const hudHidden = cinemaMode || reelProgress.active;
+
   return (
     <main className="relative w-screen h-screen overflow-hidden bg-[#0A0D14] text-slate-100">
       {/* Full-Viewport WebGL Map */}
@@ -565,22 +785,38 @@ export default function App() {
         cameraMode={cameraMode}
         recenterNonce={recenterNonce}
         onCameraModeChange={setCameraMode}
-        sidebarOpen={sidebarOpen}
+        sidebarOpen={sidebarOpen && !hudHidden}
         settings={settings}
         showHeatmap={showHeatmap}
         heatmapGeoJson={heatmapGeoJson}
         nicknames={nicknames}
         geocodeCache={geocodeCache}
+        cinemaMode={cinemaMode}
         mapInstanceRef={mapInstanceRef}
+        onMapSingleTap={handleMapSingleTap}
+        onMapDoubleTap={handleCinemaPlayPause}
         onStagingChange={setStaging}
         onMapError={handleMapError}
       />
 
+      {/* Director's Cinema Mode Overlay (2.39:1 Letterbox + Scrub + Floating Title Card) */}
+      <CinemaOverlay
+        active={cinemaMode}
+        trip={activeTrip}
+        frame={frame}
+        accentTheme={settings.accentTheme}
+        solarSync={settings.solarSync}
+        pulseIcon={cinemaPulseIcon}
+        onExit={() => exitCinemaMode(false)}
+        onTogglePlay={handleCinemaPlayPause}
+        onScrubProgress={handleSeekProgress}
+      />
+
       {/* Corridor Pre-Staging Progress Overlay */}
-      {staging.active && (
+      {staging.active && !reelProgress.active && (
         <div
           className={`fixed inset-x-0 top-20 z-30 flex justify-center px-4 pointer-events-none transition-all duration-200 ${
-            sidebarOpen ? 'md:pl-[352px]' : ''
+            sidebarOpen && !hudHidden ? 'md:pl-[352px]' : ''
           }`}
         >
           <div className="w-full max-w-xs rounded-xl instrument-surface-strong px-3.5 py-2.5 space-y-2">
@@ -614,15 +850,76 @@ export default function App() {
         </div>
       )}
 
-      {/* Unified Top Safe-Area Instrument Strip */}
-      <header className="fixed top-0 left-0 right-0 z-20 px-3 pointer-events-none safe-top-hud">
+      {/* 9:16 Video Reel Encoding Modal */}
+      {reelProgress.active && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/45 backdrop-blur-[2px]">
+          <div className="w-full max-w-sm rounded-xl instrument-surface-strong p-4 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Film
+                  className="w-4 h-4 shrink-0"
+                  style={{ color: accent.primary }}
+                />
+                <span className="text-sm font-semibold text-white truncate">
+                  Exporting 9:16 Reel
+                </span>
+              </div>
+              <span
+                className="font-mono text-xs font-medium tabular-nums shrink-0"
+                style={{ color: accent.text }}
+              >
+                {reelProgress.percent}%
+              </span>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="h-1.5 w-full rounded-full bg-white/[0.08] overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all duration-150"
+                  style={{
+                    width: `${Math.max(3, Math.min(100, reelProgress.percent))}%`,
+                    backgroundColor: accent.primary,
+                  }}
+                />
+              </div>
+              <div className="flex items-center justify-between text-[11px] text-slate-400">
+                <span className="truncate">{reelProgress.stage}</span>
+                <span className="font-mono tabular-nums shrink-0 ml-2">
+                  720×1280 · 30fps
+                </span>
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-1">
+              <button
+                type="button"
+                onClick={handleCancelReel}
+                className="px-3 py-1.5 rounded-lg instrument-inset hover:bg-white/[0.08] text-xs font-medium text-slate-200 active:scale-[0.98] transition-all"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Unified Top Safe-Area Instrument Strip (fades out cleanly in Cinema Mode) */}
+      <header
+        className={`fixed top-0 left-0 right-0 z-20 px-3 pointer-events-none safe-top-hud transition-opacity duration-300 ${
+          hudHidden ? 'opacity-0 pointer-events-none' : 'opacity-100'
+        }`}
+      >
         <div
           className={`pt-2 flex flex-wrap items-start justify-between gap-2 transition-all ${
             sidebarOpen ? 'md:pl-[344px]' : ''
           }`}
         >
           {/* Left: Single Unified Instrument Control Bar */}
-          <div className="pointer-events-auto flex flex-wrap items-center gap-1.5 max-w-full">
+          <div
+            className={`${
+              hudHidden ? 'pointer-events-none' : 'pointer-events-auto'
+            } flex flex-wrap items-center gap-1.5 max-w-full`}
+          >
             <div className="instrument-surface rounded-xl p-1 flex items-center gap-0.5 max-w-full overflow-x-auto">
               {/* Trips Drawer Trigger (when collapsed) */}
               {!sidebarOpen && (
@@ -697,7 +994,7 @@ export default function App() {
                 <span>3D</span>
               </button>
 
-              {/* Camera Mode Selector (when trip loaded) */}
+              {/* Camera Mode Selector & Director's Cinema Button (when trip loaded) */}
               {activeTrip && (
                 <>
                   <div className="w-px h-4 bg-white/[0.08] mx-0.5 shrink-0" />
@@ -721,6 +1018,19 @@ export default function App() {
                       </button>
                     );
                   })}
+
+                  <div className="w-px h-4 bg-white/[0.08] mx-0.5 shrink-0" />
+
+                  <button
+                    type="button"
+                    onClick={enterCinemaMode}
+                    className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium text-slate-300 hover:text-white hover:bg-white/[0.07] active:scale-[0.98] transition-all shrink-0"
+                    title="Enter Director's Cinema Mode (or tap empty map)"
+                    aria-label="Enter Cinema Mode"
+                  >
+                    <Clapperboard className="w-3.5 h-3.5" />
+                    <span className="hidden xl:inline">Cinema</span>
+                  </button>
                 </>
               )}
 
@@ -774,6 +1084,7 @@ export default function App() {
               frame={frame}
               units={settings.units}
               accentTheme={settings.accentTheme}
+              solarSync={settings.solarSync}
               nicknames={nicknames}
               geocodeCache={geocodeCache}
               onSaveNickname={handleSaveNickname}
@@ -854,46 +1165,52 @@ export default function App() {
       )}
 
       {/* Left Collapsible Trip Explorer */}
-      <TripSidebar
-        isOpen={sidebarOpen}
-        onToggleOpen={() => setSidebarOpen((v) => !v)}
-        index={summaryIndex}
-        viewMode={viewMode}
-        onViewModeChange={handleViewModeChange}
-        selectedTripId={selectedTripId}
-        onSelectTrip={handleSelectTrip}
-        isLoadingTrip={isLoadingTrip}
-        onFileSelected={handleFileSelected}
-        onLoadSample={handleLoadSample}
-        isParsing={isParsing}
-        parseProgress={parseProgress}
-        parseStage={parseStage}
-        onCancelParse={cancelParse}
-        units={settings.units}
-        accentTheme={settings.accentTheme}
-        showHeatmap={showHeatmap}
-        onOpenStatsModal={() => setIsStatsOpen(true)}
-        starredIds={starredIds}
-        onToggleStar={handleToggleStar}
-        cachedFileName={cachedFileName}
-        isRestoringCache={isRestoringCache}
-      />
+      {!hudHidden && (
+        <TripSidebar
+          isOpen={sidebarOpen}
+          onToggleOpen={() => setSidebarOpen((v) => !v)}
+          index={summaryIndex}
+          viewMode={viewMode}
+          onViewModeChange={handleViewModeChange}
+          selectedTripId={selectedTripId}
+          onSelectTrip={handleSelectTrip}
+          isLoadingTrip={isLoadingTrip}
+          onFileSelected={handleFileSelected}
+          onLoadSample={handleLoadSample}
+          isParsing={isParsing}
+          parseProgress={parseProgress}
+          parseStage={parseStage}
+          onCancelParse={cancelParse}
+          units={settings.units}
+          accentTheme={settings.accentTheme}
+          showHeatmap={showHeatmap}
+          onOpenStatsModal={() => setIsStatsOpen(true)}
+          starredIds={starredIds}
+          onToggleStar={handleToggleStar}
+          cachedFileName={cachedFileName}
+          isRestoringCache={isRestoringCache}
+        />
+      )}
 
       {/* Bottom Media Playback Dock */}
-      <PlaybackDock
-        trip={activeTrip}
-        frame={frame}
-        sidebarOpen={sidebarOpen}
-        units={settings.units}
-        accentTheme={settings.accentTheme}
-        onTogglePlay={handleTogglePlay}
-        onSeekProgress={handleSeekProgress}
-        onStepSegment={handleStepSegment}
-        onSelectSpeed={handleSelectSpeed}
-        onToggleLoop={handleToggleLoop}
-        onExportPostcard={() => void handleExportPostcard()}
-        isExportingPostcard={isExportingPostcard}
-      />
+      {!hudHidden && (
+        <PlaybackDock
+          trip={activeTrip}
+          frame={frame}
+          sidebarOpen={sidebarOpen}
+          units={settings.units}
+          accentTheme={settings.accentTheme}
+          onTogglePlay={handleTogglePlay}
+          onSeekProgress={handleSeekProgress}
+          onStepSegment={handleStepSegment}
+          onSelectSpeed={handleSelectSpeed}
+          onToggleLoop={handleToggleLoop}
+          onExportPostcard={() => void handleExportPostcard()}
+          isExportingPostcard={isExportingPostcard}
+          onExportReel={() => void handleExportReel()}
+          isExportingReel={reelProgress.active}
+        />
+      )}
 
       {/* Settings Modal */}
       <SettingsModal

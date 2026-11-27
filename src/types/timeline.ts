@@ -40,6 +40,31 @@ export interface AppSettings {
   units: UnitSystem;
   mapStyle: MapStyleId;
   enable3D: boolean;
+  solarSync: boolean;
+  hapticsEnabled: boolean;
+}
+
+export type SolarPhase =
+  | 'Night'
+  | 'Blue Hour'
+  | 'Dawn'
+  | 'Daylight'
+  | 'Golden Hour'
+  | 'Dusk';
+
+export interface SolarPosition {
+  elevationDeg: number; // -90..+90
+  azimuthDeg: number; // 0..360 (0=N, 90=E, 180=S, 270=W)
+  phase: SolarPhase;
+  isNight: boolean;
+}
+
+export interface ReelExportProgress {
+  active: boolean;
+  percent: number;
+  frame: number;
+  totalFrames: number;
+  stage: string;
 }
 
 export interface Waypoint {

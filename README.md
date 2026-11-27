@@ -1,4 +1,4 @@
-# ChronoMap — Private Google Timeline Replay (`v1.2.0`)
+# ChronoMap — Private Google Timeline Replay (`v1.3.0`)
 
 A privacy-first, 100% client-side web application, installable PWA, and Capacitor Android app for importing Google Timeline `.json` exports and replaying journeys with a 60fps MapLibre GL animation engine. Zero location data ever leaves the device.
 
@@ -16,9 +16,13 @@ A privacy-first, 100% client-side web application, installable PWA, and Capacito
   - **Zero-CPU GPU Route Progress:** Uploads static `LineString` GeoJSON once with `lineMetrics: true` and reveals traveled segments on the GPU via `line-gradient` shader stops while updating the puck directly with `marker.setLngLat()` (zero per-frame `setData()`).
   - **Corridor Pre-Staging Loader:** Frames each trip's bounding box (`maxZoom: 15`) with a translucent progress bar overlay (`Staging 3D Corridor...`) to warm MapLibre's GPU tile cache (`maxTileCacheSize: 250`, capped `pixelRatio <= 1.75`, `fadeDuration: 0`) with a 2.2-second timeout fallback before snapping smoothly to the starting viewpoint.
   - **3 Map Styles + 3D Buildings Mode:** Obsidian Dark (Carto), Satellite Hybrid (Esri World Imagery + Carto labels), and Daylight 3D (OpenFreeMap Liberty), plus extruded OpenFreeMap 3D buildings (`fill-extrusion`) without heavy DEM terrain draping.
+  - **Solar-Synced 3D Atmosphere (`src/utils/solar.ts`):** Computes real-time solar elevation, azimuth, and phase (`Night`, `Blue Hour`, `Dawn`, `Daylight`, `Golden Hour`, `Dusk`) from `(lat, lng, timestampMs)` to drive MapLibre's directional light, sky/fog atmosphere, 3D building shading, and night route glow boost (toggleable via **Solar Sync**).
+  - **Director's Cinema Mode (`src/components/CinemaOverlay.tsx`):** Gesture-safe single-tap on empty map space (or top HUD button) fades out standard panels, slides in `2.39:1` anamorphic letterbox bars with a minimal auto-dimming title card, engages autonomous director camera drift (`±18°` bearing sweep, `58°` close walk pitch / `46°` fast transit pitch), and supports double-tap Play/Pause, lower-screen horizontal swipe scrubbing, and single-tap or Android Back exit.
+  - **Mechanical Watch-Crown Haptics (`src/utils/haptics.ts`):** Powered by `@capacitor/haptics` with `22ms` / `1.5%` scrubber detents, medium segment/visit arrival pulses, and success notifications (toggleable via **Tactile Haptics**).
   - Four camera modes: **Chase** (`52°` in 3D), **Drone Chase** (`56°` spline pitch), **Overview**, and **Free** with one-click **Re-center**.
-- **Route Postcard Export (`src/utils/postcard.ts`)**
-  - Captures the live WebGL canvas (`preserveDrawingBuffer: true`) into a framed **1080×1350** editorial route postcard with date, title, distance, duration, mode pills, and `ChronoMap v1.2.0` footer, opening the native Share Sheet (`navigator.share`) or downloading a PNG.
+- **Route Postcard & Automated 9:16 Video Reel Export (`src/utils/postcard.ts`, `src/utils/reelExporter.ts`)**
+  - **Postcard (1080×1350):** Captures the live WebGL canvas (`preserveDrawingBuffer: true`) into a framed editorial route postcard with date, title, distance, duration, mode pills, and `ChronoMap v1.3.0` footer via `navigator.share` or PNG download.
+  - **Video Reel (9:16, 720×1280 @ 30fps):** Automates a 12-second (360-frame) 3D Drone Chase sweep composited with live telemetry, solar phase, and progress bar into a `video/webm` reel via `MediaRecorder` + cancelable progress modal.
 - **Smart Discovery, Reverse Geocoding & All-Time Heatmap (`src/components/TripSidebar.tsx`, `src/utils/geocoder.ts`, `src/components/StatsModal.tsx`)**
   - Star/bookmark toggles on trip and day rows (persisted in `localStorage`) plus quick filter tabs: **All**, **Starred**, **On This Day**, and **Longest**.
   - Rate-limited Nominatim reverse-geocoding (1 req/sec) and tap-to-rename visit nicknames persisted in `localStorage`.

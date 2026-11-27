@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 import {
   Camera,
+  Film,
   Loader2,
   Pause,
   Play,
@@ -23,6 +24,7 @@ import {
   formatShortTime,
 } from '../utils/format';
 import { clamp, lerp, MODE_COLORS, MODE_LABELS } from '../utils/geo';
+import { resetCrownDetent, triggerCrownTick } from '../utils/haptics';
 import { ACCENT_THEMES } from '../utils/settings';
 
 interface PlaybackDockProps {
@@ -38,6 +40,8 @@ interface PlaybackDockProps {
   onToggleLoop: () => void;
   onExportPostcard: () => void;
   isExportingPostcard: boolean;
+  onExportReel: () => void;
+  isExportingReel: boolean;
 }
 
 export function PlaybackDock({
@@ -53,6 +57,8 @@ export function PlaybackDock({
   onToggleLoop,
   onExportPostcard,
   isExportingPostcard,
+  onExportReel,
+  isExportingReel,
 }: PlaybackDockProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const [hoverProgress, setHoverProgress] = useState<number | null>(null);
@@ -73,6 +79,7 @@ export function PlaybackDock({
     isScrubbingRef.current = true;
     const p = computeProgressFromClientX(e.clientX);
     setDragProgress(p);
+    triggerCrownTick(p);
     onSeekProgress(p);
 
     const onMove = (ev: PointerEvent) => {
@@ -80,12 +87,14 @@ export function PlaybackDock({
       const mp = computeProgressFromClientX(ev.clientX);
       setHoverProgress(mp);
       setDragProgress(mp);
+      triggerCrownTick(mp);
       onSeekProgress(mp);
     };
 
     const onUp = () => {
       isScrubbingRef.current = false;
       setDragProgress(null);
+      resetCrownDetent();
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
     };
@@ -298,7 +307,7 @@ export function PlaybackDock({
             <button
               type="button"
               onClick={onExportPostcard}
-              disabled={isExportingPostcard}
+              disabled={isExportingPostcard || isExportingReel}
               className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg instrument-inset hover:bg-white/[0.08] text-slate-200 hover:text-white text-xs font-medium active:scale-[0.98] transition-all disabled:opacity-50"
               title="Export 1080×1350 Route Postcard"
               aria-label="Share route postcard"
@@ -308,7 +317,23 @@ export function PlaybackDock({
               ) : (
                 <Camera className="w-3.5 h-3.5" style={{ color: accent.primary }} />
               )}
-              <span className="hidden sm:inline">Share Card</span>
+              <span className="hidden sm:inline">Card</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={onExportReel}
+              disabled={isExportingReel || isExportingPostcard}
+              className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg instrument-inset hover:bg-white/[0.08] text-slate-200 hover:text-white text-xs font-medium active:scale-[0.98] transition-all disabled:opacity-50"
+              title="Export 12s 9:16 Video Reel (720×1280)"
+              aria-label="Export 9:16 video reel"
+            >
+              {isExportingReel ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ color: accent.primary }} />
+              ) : (
+                <Film className="w-3.5 h-3.5" style={{ color: accent.primary }} />
+              )}
+              <span className="hidden sm:inline">Reel 9:16</span>
             </button>
           </div>
 

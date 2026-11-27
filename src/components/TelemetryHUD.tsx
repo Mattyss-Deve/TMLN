@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Check, Edit3, MapPin, X } from 'lucide-react';
+import { Check, Edit3, MapPin, Moon, Sun, Sunrise, Sunset, X } from 'lucide-react';
 import type {
   AccentThemeId,
+  SolarPhase,
   TelemetryFrame,
   UnitSystem,
 } from '../types/timeline';
@@ -14,20 +15,39 @@ import {
 } from '../utils/format';
 import { getCoordKey, resolveVisitDisplayName } from '../utils/geocoder';
 import { MODE_COLORS, MODE_LABELS } from '../utils/geo';
+import { computeSolarPosition, getSolarPhaseAccent } from '../utils/solar';
 import { ModeIcon } from './ModeIcon';
 
 interface TelemetryHUDProps {
   frame: TelemetryFrame | null;
   units: UnitSystem;
   accentTheme: AccentThemeId;
+  solarSync: boolean;
   nicknames: Record<string, string>;
   geocodeCache: Record<string, string>;
   onSaveNickname: (lat: number, lng: number, nickname: string) => void;
 }
 
+function SolarPhaseIcon({ phase }: { phase: SolarPhase }) {
+  switch (phase) {
+    case 'Night':
+    case 'Blue Hour':
+      return <Moon className="w-3 h-3 shrink-0" />;
+    case 'Dawn':
+      return <Sunrise className="w-3 h-3 shrink-0" />;
+    case 'Dusk':
+    case 'Golden Hour':
+      return <Sunset className="w-3 h-3 shrink-0" />;
+    case 'Daylight':
+    default:
+      return <Sun className="w-3 h-3 shrink-0" />;
+  }
+}
+
 export function TelemetryHUD({
   frame,
   units,
+  solarSync,
   nicknames,
   geocodeCache,
   onSaveNickname,
@@ -53,11 +73,15 @@ export function TelemetryHUD({
     ? resolveVisitDisplayName(activeVisit, nicknames, geocodeCache)
     : '';
   const isEditingVisit = Boolean(activeVisitKey && editingKey === activeVisitKey);
+  const solar = solarSync
+    ? computeSolarPosition(frame.lat, frame.lng, frame.currentTimeMs)
+    : null;
+  const solarColor = solar ? getSolarPhaseAccent(solar.phase) : '#fde047';
 
   return (
     <div className="flex flex-col items-end gap-1.5 pointer-events-none select-none max-w-full">
       {/* Low-profile Horizontal Telemetry Instrument Bar */}
-      <div className="pointer-events-auto instrument-surface rounded-xl px-2.5 sm:px-3 py-1.5 flex items-center gap-2 sm:gap-3">
+      <div className="pointer-events-auto instrument-surface rounded-xl px-2.5 sm:px-3 py-1.5 flex items-center gap-2 sm:gap-2.5">
         {/* Live Clock */}
         <div className="flex items-baseline gap-1.5 shrink-0">
           <span className="text-xs sm:text-sm font-mono font-semibold text-white tabular-nums tracking-tight">
@@ -100,6 +124,24 @@ export function TelemetryHUD({
           <ModeIcon mode={frame.mode} className="w-3 h-3" />
           <span className="hidden sm:inline">{MODE_LABELS[frame.mode]}</span>
         </div>
+
+        {/* Subtle Solar Phase Pill */}
+        {solar && (
+          <div
+            className="hidden md:inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border text-[11px] font-medium shrink-0"
+            style={{
+              color: solarColor,
+              borderColor: `${solarColor}30`,
+              backgroundColor: `${solarColor}12`,
+            }}
+            title={`Solar elevation ${solar.elevationDeg.toFixed(1)}° · Azimuth ${Math.round(
+              solar.azimuthDeg
+            )}°`}
+          >
+            <SolarPhaseIcon phase={solar.phase} />
+            <span>{solar.phase}</span>
+          </div>
+        )}
       </div>
 
       {/* Compact Visit Chip (Only while dwelling at a place visit) */}
