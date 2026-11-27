@@ -4,6 +4,7 @@ import type { AnimationController } from '../engine/animationController';
 import type {
   AppSettings,
   CameraMode,
+  CorridorStagingState,
   MapStyleId,
   PlaceVisit,
   TelemetryFrame,
@@ -12,7 +13,8 @@ import type {
 } from '../types/timeline';
 import { formatDuration } from '../utils/format';
 import { resolveVisitDisplayName } from '../utils/geocoder';
-import { clamp, lerp, lerpAngle, MODE_COLORS } from '../utils/geo';
+import { lerp, lerpAngle, MODE_COLORS } from '../utils/geo';
+import { buildLineGradientExpression } from '../utils/lineGradient';
 import { ACCENT_THEMES } from '../utils/settings';
 
 const CARTO_DARK_STYLE =
@@ -64,6 +66,8 @@ const EMPTY_FC: GeoJSON.FeatureCollection = {
   features: [],
 };
 
+const STAGING_TIMEOUT_MS = 2200;
+
 function getMapStyleSource(
   styleId: MapStyleId
 ): string | maplibregl.StyleSpecification {
@@ -81,6 +85,7 @@ function getMapStyleSource(
 interface MapCanvasProps {
   controller: AnimationController;
   trip: Trip | null;
+  autoPlayOnReady: boolean;
   cameraMode: CameraMode;
   recenterNonce: number;
   onCameraModeChange: (mode: CameraMode) => void;
@@ -90,6 +95,7 @@ interface MapCanvasProps {
   heatmapGeoJson: GeoJSON.FeatureCollection | null;
   nicknames: Record<string, string>;
   geocodeCache: Record<string, string>;
+  onStagingChange?: (state: CorridorStagingState) => void;
   onMapError?: (message: string) => void;
 }
 
@@ -110,103 +116,14 @@ function getTargetZoomForFrame(frame: TelemetryFrame, isDrone = false): number {
   else if (frame.mode === 'CYCLING' || frame.speedKmh > 7) base = 14.8;
   else base = 15.8;
 
-  return isDrone ? Math.min(18.2, base + 1.35) : base;
+  return isDrone ? Math.min(18, base + 1.2) : base;
 }
 
 function getCameraPitchForMode(mode: CameraMode, enable3D: boolean): number {
-  if (mode === 'DRONE') return 65;
-  if (mode === 'CHASE') return enable3D ? 62 : 50;
-  if (mode === 'OVERVIEW') return enable3D ? 48 : 22;
-  return enable3D ? 62 : 0;
-}
-
-function buildGhostRouteGeoJson(trip: Trip | null): GeoJSON.FeatureCollection {
-  if (!trip || trip.waypoints.length < 2) {
-    return EMPTY_FC;
-  }
-  return {
-    type: 'FeatureCollection',
-    features: [
-      {
-        type: 'Feature',
-        properties: {},
-        geometry: {
-          type: 'LineString',
-          coordinates: trip.waypoints.map((w) => [w.lng, w.lat]),
-        },
-      },
-    ],
-  };
-}
-
-function buildActiveRouteGeoJson(
-  trip: Trip,
-  frame: TelemetryFrame
-): GeoJSON.FeatureCollection {
-  const waypoints = trip.waypoints;
-  if (waypoints.length < 2) {
-    return EMPTY_FC;
-  }
-
-  const endIdx = clamp(frame.traveledWaypointIndex, 0, waypoints.length - 1);
-  const features: GeoJSON.Feature<GeoJSON.LineString>[] = [];
-
-  let runMode: TransportMode = waypoints[0].mode;
-  let runCoords: [number, number][] = [[waypoints[0].lng, waypoints[0].lat]];
-
-  for (let i = 1; i <= endIdx; i++) {
-    const wp = waypoints[i];
-    const coord: [number, number] = [wp.lng, wp.lat];
-
-    if (wp.mode !== runMode) {
-      runCoords.push(coord);
-      if (runCoords.length >= 2) {
-        features.push({
-          type: 'Feature',
-          properties: {
-            mode: runMode,
-            color: MODE_COLORS[runMode],
-          },
-          geometry: {
-            type: 'LineString',
-            coordinates: runCoords,
-          },
-        });
-      }
-      runMode = wp.mode;
-      runCoords = [coord];
-    } else {
-      runCoords.push(coord);
-    }
-  }
-
-  const tipCoord: [number, number] = [frame.lng, frame.lat];
-  const lastCoord = runCoords[runCoords.length - 1];
-  if (
-    Math.abs(lastCoord[0] - tipCoord[0]) > 1e-7 ||
-    Math.abs(lastCoord[1] - tipCoord[1]) > 1e-7
-  ) {
-    runCoords.push(tipCoord);
-  }
-
-  if (runCoords.length >= 2) {
-    features.push({
-      type: 'Feature',
-      properties: {
-        mode: runMode,
-        color: MODE_COLORS[runMode],
-      },
-      geometry: {
-        type: 'LineString',
-        coordinates: runCoords,
-      },
-    });
-  }
-
-  return {
-    type: 'FeatureCollection',
-    features,
-  };
+  if (mode === 'DRONE') return 56;
+  if (mode === 'CHASE') return enable3D ? 52 : 45;
+  if (mode === 'OVERVIEW') return enable3D ? 38 : 18;
+  return enable3D ? 52 : 0;
 }
 
 function createPuckElement() {
@@ -271,6 +188,7 @@ function createPuckElement() {
 export function MapCanvas({
   controller,
   trip,
+  autoPlayOnReady,
   cameraMode,
   recenterNonce,
   onCameraModeChange,
@@ -280,16 +198,20 @@ export function MapCanvas({
   heatmapGeoJson,
   nicknames,
   geocodeCache,
+  onStagingChange,
   onMapError,
 }: MapCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const styleLoadedRef = useRef(false);
   const appliedStyleIdRef = useRef<MapStyleId>(settings.mapStyle);
-  const [mapReady, setMapReady] = useState(false);
+  const [styleRevision, setStyleRevision] = useState(0);
 
   const tripRef = useRef<Trip | null>(trip);
   tripRef.current = trip;
+
+  const autoPlayRef = useRef<boolean>(autoPlayOnReady);
+  autoPlayRef.current = autoPlayOnReady;
 
   const cameraModeRef = useRef<CameraMode>(cameraMode);
   cameraModeRef.current = cameraMode;
@@ -315,8 +237,18 @@ export function MapCanvas({
   const onCameraModeChangeRef = useRef(onCameraModeChange);
   onCameraModeChangeRef.current = onCameraModeChange;
 
+  const onStagingChangeRef = useRef(onStagingChange);
+  onStagingChangeRef.current = onStagingChange;
+
   const onMapErrorRef = useRef(onMapError);
   onMapErrorRef.current = onMapError;
+
+  const isStagingRef = useRef(false);
+  const stagingCleanupRef = useRef<(() => void) | null>(null);
+  const stagingSeqRef = useRef(0);
+
+  const lastGradientProgressRef = useRef<number>(-1);
+  const lastGradientTripIdRef = useRef<string | null>(null);
 
   const puckRef = useRef<{
     marker: maplibregl.Marker;
@@ -364,6 +296,62 @@ export function MapCanvas({
     }
   }, []);
 
+  /**
+   * Updates GPU line-gradient shader progress without calling setData()!
+   */
+  const updateGpuRouteProgress = useCallback(
+    (map: maplibregl.Map, tripId: string, lineProgress: number, force = false) => {
+      const prebaked = controller.getPrebakedRoute();
+      if (!prebaked || prebaked.tripId !== tripId || !prebaked.hasGeometry) {
+        return;
+      }
+
+      if (
+        !force &&
+        lastGradientTripIdRef.current === tripId &&
+        Math.abs(lineProgress - lastGradientProgressRef.current) < 0.0002
+      ) {
+        return;
+      }
+
+      lastGradientTripIdRef.current = tripId;
+      lastGradientProgressRef.current = lineProgress;
+
+      const curSettings = settingsRef.current;
+      const accent = ACCENT_THEMES[curSettings.accentTheme];
+
+      if (map.getLayer('active-route-core')) {
+        const coreExpr = buildLineGradientExpression(
+          prebaked.colorStops,
+          lineProgress
+        );
+        map.setPaintProperty(
+          'active-route-core',
+          'line-gradient',
+          coreExpr as maplibregl.ExpressionSpecification
+        );
+      }
+
+      if (map.getLayer('active-route-glow') && curSettings.routeGlow) {
+        const glowExpr = buildLineGradientExpression(
+          prebaked.colorStops,
+          lineProgress,
+          curSettings.accentTheme === 'CYAN' ? undefined : accent.primary
+        );
+        map.setPaintProperty(
+          'active-route-glow',
+          'line-gradient',
+          glowExpr as maplibregl.ExpressionSpecification
+        );
+      }
+    },
+    [controller]
+  );
+
+  /**
+   * 60fps animation frame handler: zero GeoJSON allocations or setData() calls.
+   * Exclusively updates GPU line-gradient shader, marker position/bearing, and camera.
+   */
   const applyFrameToMap = useCallback(
     (frame: TelemetryFrame) => {
       const map = mapRef.current;
@@ -372,13 +360,10 @@ export function MapCanvas({
       const currentTrip = tripRef.current;
       if (!currentTrip || currentTrip.id !== frame.tripId) return;
 
-      const activeSource = map.getSource('active-route') as
-        | maplibregl.GeoJSONSource
-        | undefined;
-      if (activeSource) {
-        activeSource.setData(buildActiveRouteGeoJson(currentTrip, frame));
-      }
+      // 1. GPU shader progress update (zero CPU GeoJSON re-tiling)
+      updateGpuRouteProgress(map, frame.tripId, frame.lineProgress, false);
 
+      // 2. Direct DOM marker positioning & directional cone rotation
       const puck = puckRef.current;
       if (puck) {
         puck.marker.setLngLat([frame.lng, frame.lat]);
@@ -395,7 +380,11 @@ export function MapCanvas({
         }
       }
 
+      // 3. Highlight active place visit marker
       frameVisitHighlight(frame.activeVisit ? frame.activeVisit.id : null);
+
+      // 4. Camera Chase / Drone Chase tracking (paused during corridor pre-staging)
+      if (isStagingRef.current) return;
 
       const mode = cameraModeRef.current;
       if (mode === 'CHASE' || mode === 'DRONE') {
@@ -438,10 +427,9 @@ export function MapCanvas({
         let centerLng = frame.lng;
         let centerLat = frame.lat;
 
-        // Drone Chase slight forward look-ahead so the marker glides in the lower frame
         if (isDrone && frame.mode !== 'STILL') {
           const rad = (chaseCameraRef.current.bearing * Math.PI) / 180;
-          const aheadDeg = frame.mode === 'FLYING' ? 0.015 : 0.00035;
+          const aheadDeg = frame.mode === 'FLYING' ? 0.014 : 0.00032;
           centerLat += Math.cos(rad) * aheadDeg;
           centerLng +=
             (Math.sin(rad) * aheadDeg) /
@@ -456,32 +444,22 @@ export function MapCanvas({
         });
       }
     },
-    [frameVisitHighlight]
+    [frameVisitHighlight, updateGpuRouteProgress]
   );
 
   /**
-   * Re-attaches all custom ChronoMap sources & layers (3D terrain, 3D buildings,
-   * heatmap, ghost route, active glowing route) idempotently on every style.load.
+   * Re-attaches all custom ChronoMap sources & layers (3D buildings without DEM
+   * terrain draping, heatmap, static pre-baked ghost & active lineMetrics routes)
+   * idempotently on every style.load.
    */
   const syncCustomSourcesAndLayers = useCallback(
     (map: maplibregl.Map) => {
       const curSettings = settingsRef.current;
       const accent = ACCENT_THEMES[curSettings.accentTheme];
+      const prebaked = controller.getPrebakedRoute();
+      const snap = controller.getSnapshot();
 
-      // 1. AWS Terrarium DEM source for 3D Terrain
-      if (!map.getSource('terrain-dem')) {
-        map.addSource('terrain-dem', {
-          type: 'raster-dem',
-          tiles: [
-            'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png',
-          ],
-          encoding: 'terrarium',
-          tileSize: 256,
-          maxzoom: 15,
-        });
-      }
-
-      // 2. OpenFreeMap Planet vector source for 3D extruded buildings
+      // 1. OpenFreeMap Planet vector source for crisp 3D extruded buildings (no DEM terrain draping)
       if (!map.getSource('openfreemap-3d')) {
         map.addSource('openfreemap-3d', {
           type: 'vector',
@@ -525,18 +503,7 @@ export function MapCanvas({
         });
       }
 
-      // Apply 3D terrain
-      try {
-        map.setTerrain(
-          curSettings.enable3D
-            ? { source: 'terrain-dem', exaggeration: 1.35 }
-            : null
-        );
-      } catch {
-        // Ignore terrain errors if style is mid-transition
-      }
-
-      // 3. All-Time Heatmap source & layers (route ribbons + thermal point density)
+      // 2. All-Time Heatmap source & layers
       if (!map.getSource('alltime-heatmap')) {
         map.addSource('alltime-heatmap', {
           type: 'geojson',
@@ -596,11 +563,11 @@ export function MapCanvas({
         });
       }
 
-      // 4. Ghost Route source & layer
+      // 3. Static Ghost Route source & layer (uploaded once per trip)
       if (!map.getSource('ghost-route')) {
         map.addSource('ghost-route', {
           type: 'geojson',
-          data: buildGhostRouteGeoJson(tripRef.current),
+          data: prebaked?.geojson ?? EMPTY_FC,
         });
       }
 
@@ -621,13 +588,25 @@ export function MapCanvas({
         });
       }
 
-      // 5. Active Glowing Route source & layers
+      // 4. Static Active Route source with lineMetrics: true (GPU line-gradient shader progress)
       if (!map.getSource('active-route')) {
         map.addSource('active-route', {
           type: 'geojson',
-          data: EMPTY_FC,
+          lineMetrics: true,
+          data: prebaked?.geojson ?? EMPTY_FC,
         });
       }
+
+      const initialProgress = snap?.lineProgress ?? 0;
+      const initialCoreGradient = buildLineGradientExpression(
+        prebaked?.colorStops ?? [],
+        initialProgress
+      );
+      const initialGlowGradient = buildLineGradientExpression(
+        prebaked?.colorStops ?? [],
+        initialProgress,
+        curSettings.accentTheme === 'CYAN' ? undefined : accent.primary
+      );
 
       if (!map.getLayer('active-route-glow')) {
         map.addLayer({
@@ -639,8 +618,7 @@ export function MapCanvas({
             'line-join': 'round',
           },
           paint: {
-            'line-color':
-              curSettings.accentTheme === 'CYAN' ? ['get', 'color'] : accent.primary,
+            'line-gradient': initialGlowGradient as maplibregl.ExpressionSpecification,
             'line-width': curSettings.routeWidth * 3.1,
             'line-blur': curSettings.routeGlow ? 7 : 0,
             'line-opacity': curSettings.routeGlow ? 0.5 : 0,
@@ -658,14 +636,13 @@ export function MapCanvas({
             'line-join': 'round',
           },
           paint: {
-            'line-color': ['get', 'color'],
+            'line-gradient': initialCoreGradient as maplibregl.ExpressionSpecification,
             'line-width': curSettings.routeWidth,
             'line-opacity': 0.98,
           },
         });
       }
 
-      // Ensure pulsing puck marker exists
       if (!puckRef.current) {
         const puckEl = createPuckElement();
         const puckMarker = new maplibregl.Marker({
@@ -690,18 +667,213 @@ export function MapCanvas({
         };
       }
 
+      lastGradientProgressRef.current = -1;
+      lastGradientTripIdRef.current = null;
       styleLoadedRef.current = true;
-      setMapReady(true);
+      setStyleRevision((r) => r + 1);
+    },
+    [controller]
+  );
+
+  /**
+   * Snap camera cleanly to current/starting trip viewpoint (zero-stutter transition).
+   */
+  const snapToActiveViewpoint = useCallback(
+    (map: maplibregl.Map, targetTrip: Trip, animate = false) => {
+      const mode = cameraModeRef.current;
+      const snap = controller.getSnapshot();
+
+      if (mode === 'OVERVIEW') {
+        map.fitBounds(targetTrip.bounds, {
+          padding: {
+            top: 100,
+            bottom: 145,
+            left: sidebarOpenRef.current ? 360 : 56,
+            right: 260,
+          },
+          pitch: getCameraPitchForMode('OVERVIEW', settingsRef.current.enable3D),
+          bearing: 0,
+          duration: animate ? 650 : 0,
+          maxZoom: 15.5,
+        });
+        return;
+      }
+
+      if (snap) {
+        const isDrone = mode === 'DRONE';
+        const targetZoom = getTargetZoomForFrame(snap, isDrone);
+        const targetPitch = getCameraPitchForMode(mode, settingsRef.current.enable3D);
+        chaseCameraRef.current.zoom = targetZoom;
+        chaseCameraRef.current.bearing = snap.bearing;
+        chaseCameraRef.current.pitch = targetPitch;
+        chaseCameraRef.current.initialized = true;
+
+        if (animate) {
+          chaseCameraRef.current.transitionUntilMs = performance.now() + 560;
+          map.easeTo({
+            center: [snap.lng, snap.lat],
+            zoom: targetZoom,
+            pitch: targetPitch,
+            bearing: snap.bearing,
+            duration: 540,
+          });
+        } else {
+          chaseCameraRef.current.transitionUntilMs = 0;
+          map.jumpTo({
+            center: [snap.lng, snap.lat],
+            zoom: targetZoom,
+            pitch: targetPitch,
+            bearing: snap.bearing,
+          });
+        }
+      }
+    },
+    [controller]
+  );
+
+  /**
+   * Corridor Pre-Staging Pipeline:
+   * 1) Upload pre-baked static GeoJSON once (0% -> 40%)
+   * 2) Frame trip bounding box with duration: 0, maxZoom: 15 to warm GPU tile cache,
+   *    waiting for map.once('idle') with a hard 2.2s timeout cap (40% -> 95%)
+   * 3) Snap cleanly to starting viewpoint & dismiss overlay (100%)
+   */
+  const runCorridorPreStaging = useCallback(
+    (
+      map: maplibregl.Map,
+      targetTrip: Trip,
+      shouldAutoPlay: boolean,
+      stageLabel = 'Staging 3D Corridor...'
+    ) => {
+      // Abort any previous staging pass
+      stagingCleanupRef.current?.();
+      stagingCleanupRef.current = null;
+
+      const seq = ++stagingSeqRef.current;
+      isStagingRef.current = true;
+
+      const wasPlaying = controller.getSnapshot()?.isPlaying ?? false;
+      if (wasPlaying) {
+        controller.pause();
+      }
+      const resumePlayback = shouldAutoPlay || wasPlaying;
+
+      onStagingChangeRef.current?.({
+        active: true,
+        percent: 15,
+        label: stageLabel,
+      });
+
+      // Stage 1: Upload pre-baked spline GeoJSON once (0% -> 40%)
+      const prebaked = controller.getPrebakedRoute();
+      const routeGeoJson = prebaked?.geojson ?? EMPTY_FC;
+
+      const ghostSource = map.getSource('ghost-route') as
+        | maplibregl.GeoJSONSource
+        | undefined;
+      if (ghostSource) {
+        ghostSource.setData(routeGeoJson);
+      }
+
+      const activeSource = map.getSource('active-route') as
+        | maplibregl.GeoJSONSource
+        | undefined;
+      if (activeSource) {
+        activeSource.setData(routeGeoJson);
+      }
 
       const snap = controller.getSnapshot();
       if (snap) {
-        applyFrameToMap(snap);
+        updateGpuRouteProgress(map, snap.tripId, snap.lineProgress, true);
       }
+
+      onStagingChangeRef.current?.({
+        active: true,
+        percent: 40,
+        label: 'Pre-loading corridor tiles...',
+      });
+
+      // Stage 2: Frame full corridor instantaneously so MapLibre downloads & caches tiles
+      map.fitBounds(targetTrip.bounds, {
+        duration: 0,
+        maxZoom: 15,
+        padding: {
+          top: 84,
+          bottom: 132,
+          left: sidebarOpenRef.current ? 350 : 48,
+          right: 240,
+        },
+        pitch: settingsRef.current.enable3D ? 42 : 0,
+        bearing: 0,
+      });
+
+      let currentPercent = 44;
+      let finished = false;
+      let dismissTimerId: number | null = null;
+
+      const progressTimerId = window.setInterval(() => {
+        if (finished || seq !== stagingSeqRef.current) return;
+        currentPercent = Math.min(93, currentPercent + 6);
+        onStagingChangeRef.current?.({
+          active: true,
+          percent: currentPercent,
+          label: 'Pre-loading corridor tiles...',
+        });
+      }, 140);
+
+      const finishStaging = () => {
+        if (finished || seq !== stagingSeqRef.current) return;
+        finished = true;
+
+        window.clearInterval(progressTimerId);
+        window.clearTimeout(timeoutId);
+        map.off('idle', finishStaging);
+
+        onStagingChangeRef.current?.({
+          active: true,
+          percent: 100,
+          label: 'Corridor ready',
+        });
+
+        isStagingRef.current = false;
+        snapToActiveViewpoint(map, targetTrip, false);
+
+        const latestSnap = controller.getSnapshot();
+        if (latestSnap) {
+          applyFrameToMap(latestSnap);
+        }
+
+        dismissTimerId = window.setTimeout(() => {
+          if (seq !== stagingSeqRef.current) return;
+          onStagingChangeRef.current?.({
+            active: false,
+            percent: 100,
+            label: '',
+          });
+          if (resumePlayback) {
+            controller.play();
+          }
+        }, 140);
+      };
+
+      const timeoutId = window.setTimeout(finishStaging, STAGING_TIMEOUT_MS);
+      map.once('idle', finishStaging);
+
+      stagingCleanupRef.current = () => {
+        finished = true;
+        isStagingRef.current = false;
+        window.clearInterval(progressTimerId);
+        window.clearTimeout(timeoutId);
+        if (dismissTimerId !== null) {
+          window.clearTimeout(dismissTimerId);
+        }
+        map.off('idle', finishStaging);
+      };
     },
-    [applyFrameToMap, controller]
+    [controller, applyFrameToMap, snapToActiveViewpoint, updateGpuRouteProgress]
   );
 
-  // Initialize MapLibre GL once
+  // Initialize MapLibre GL once with mobile GPU optimizations
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -714,9 +886,12 @@ export function MapCanvas({
       style: getMapStyleSource(settingsRef.current.mapStyle),
       center: [-122.42, 37.79],
       zoom: 2.3,
-      pitch: settingsRef.current.enable3D ? 62 : 0,
+      pitch: settingsRef.current.enable3D ? 52 : 0,
       bearing: 0,
-      maxPitch: 75,
+      maxPitch: 68,
+      fadeDuration: 0,
+      pixelRatio: Math.min(window.devicePixelRatio || 1, 1.75),
+      maxTileCacheSize: 250,
       attributionControl: false,
     });
 
@@ -727,7 +902,7 @@ export function MapCanvas({
     mapRef.current = map;
 
     const unlockToFreeMode = (ev: { originalEvent?: unknown }) => {
-      if (!ev.originalEvent) return;
+      if (!ev.originalEvent || isStagingRef.current) return;
       if (cameraModeRef.current === 'CHASE' || cameraModeRef.current === 'DRONE') {
         onCameraModeChangeRef.current('FREE');
       }
@@ -751,8 +926,9 @@ export function MapCanvas({
     });
 
     return () => {
+      stagingCleanupRef.current?.();
+      stagingCleanupRef.current = null;
       styleLoadedRef.current = false;
-      setMapReady(false);
       for (const h of visitHandlesRef.current) {
         h.marker.remove();
       }
@@ -764,33 +940,27 @@ export function MapCanvas({
     };
   }, [syncCustomSourcesAndLayers]);
 
-  // Switch Map Style seamlessly without losing routes or markers
+  // Switch Map Style seamlessly (style.load triggers corridor pre-staging)
   useEffect(() => {
     const map = mapRef.current;
     if (!map || appliedStyleIdRef.current === settings.mapStyle) return;
     appliedStyleIdRef.current = settings.mapStyle;
     styleLoadedRef.current = false;
-    try {
-      map.setTerrain(null);
-    } catch {
-      // Ignore if terrain wasn't active
+    if (tripRef.current) {
+      onStagingChangeRef.current?.({
+        active: true,
+        percent: 10,
+        label: 'Switching map style...',
+      });
     }
     map.setStyle(getMapStyleSource(settings.mapStyle));
   }, [settings.mapStyle]);
 
-  // Toggle 3D Terrain & Extruded 3D Buildings dynamically
+  // Toggle crisp 3D Buildings (without DEM terrain) + pre-stage corridor
   const prevEnable3DRef = useRef<boolean>(settings.enable3D);
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !styleLoadedRef.current) return;
-
-    try {
-      map.setTerrain(
-        settings.enable3D ? { source: 'terrain-dem', exaggeration: 1.35 } : null
-      );
-    } catch {
-      // Ignore if terrain source not yet mounted
-    }
 
     if (map.getLayer('chronomap-3d-buildings')) {
       map.setLayoutProperty(
@@ -802,20 +972,24 @@ export function MapCanvas({
 
     if (prevEnable3DRef.current !== settings.enable3D) {
       prevEnable3DRef.current = settings.enable3D;
-      if (settings.enable3D) {
-        chaseCameraRef.current.transitionUntilMs = performance.now() + 720;
-        chaseCameraRef.current.pitch = 62;
-        map.easeTo({ pitch: 62, duration: 700 });
-      } else if (cameraModeRef.current !== 'DRONE') {
-        const nextPitch = getCameraPitchForMode(cameraModeRef.current, false);
-        chaseCameraRef.current.transitionUntilMs = performance.now() + 620;
-        chaseCameraRef.current.pitch = nextPitch;
-        map.easeTo({ pitch: nextPitch, duration: 600 });
+      const curTrip = tripRef.current;
+      if (curTrip) {
+        runCorridorPreStaging(
+          map,
+          curTrip,
+          false,
+          settings.enable3D ? 'Staging 3D Buildings...' : 'Updating 2D Corridor...'
+        );
+      } else {
+        map.easeTo({
+          pitch: settings.enable3D ? 52 : 0,
+          duration: 500,
+        });
       }
     }
-  }, [settings.enable3D, mapReady]);
+  }, [settings.enable3D, styleRevision, runCorridorPreStaging]);
 
-  // Update Route Thickness, Glow Intensity, and Accent Theme live
+  // Update Route Thickness, Glow Intensity, and Accent Theme live on GPU
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !styleLoadedRef.current) return;
@@ -840,11 +1014,6 @@ export function MapCanvas({
         'line-opacity',
         settings.routeGlow ? 0.5 : 0
       );
-      map.setPaintProperty(
-        'active-route-glow',
-        'line-color',
-        settings.accentTheme === 'CYAN' ? ['get', 'color'] : accent.primary
-      );
     }
     if (map.getLayer('ghost-route-line')) {
       map.setPaintProperty(
@@ -856,7 +1025,19 @@ export function MapCanvas({
     if (map.getLayer('alltime-heatmap-routes')) {
       map.setPaintProperty('alltime-heatmap-routes', 'line-color', accent.primary);
     }
-  }, [settings.routeWidth, settings.routeGlow, settings.accentTheme, mapReady]);
+
+    const snap = controller.getSnapshot();
+    if (snap) {
+      updateGpuRouteProgress(map, snap.tripId, snap.lineProgress, true);
+    }
+  }, [
+    settings.routeWidth,
+    settings.routeGlow,
+    settings.accentTheme,
+    styleRevision,
+    controller,
+    updateGpuRouteProgress,
+  ]);
 
   // Update All-Time Heatmap source & visibility dynamically
   useEffect(() => {
@@ -877,19 +1058,19 @@ export function MapCanvas({
     if (map.getLayer('alltime-heatmap-density')) {
       map.setLayoutProperty('alltime-heatmap-density', 'visibility', vis);
     }
-  }, [showHeatmap, heatmapGeoJson, mapReady]);
+  }, [showHeatmap, heatmapGeoJson, styleRevision]);
 
-  // Subscribe to 60fps animation frames
+  // Subscribe directly to 60fps RAF frames (zero React state re-renders)
   useEffect(() => {
     return controller.subscribeFrame((frame) => {
       applyFrameToMap(frame);
     });
   }, [controller, applyFrameToMap]);
 
-  // Sync ghost route, visit markers, and initial framing when Trip changes
+  // Sync visit markers & trigger Corridor Pre-Staging when Trip or Style loads
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !styleLoadedRef.current || !mapReady) return;
+    if (!map || !styleLoadedRef.current || styleRevision === 0) return;
 
     for (const h of visitHandlesRef.current) {
       h.marker.remove();
@@ -897,20 +1078,21 @@ export function MapCanvas({
     visitHandlesRef.current = [];
     activeVisitIdRef.current = null;
 
-    const ghostSource = map.getSource('ghost-route') as
-      | maplibregl.GeoJSONSource
-      | undefined;
-    if (ghostSource) {
-      ghostSource.setData(buildGhostRouteGeoJson(trip));
-    }
-
-    const activeSource = map.getSource('active-route') as
-      | maplibregl.GeoJSONSource
-      | undefined;
     if (!trip) {
-      if (activeSource) {
-        activeSource.setData(EMPTY_FC);
-      }
+      stagingCleanupRef.current?.();
+      stagingCleanupRef.current = null;
+      onStagingChangeRef.current?.({ active: false, percent: 0, label: '' });
+
+      const ghostSource = map.getSource('ghost-route') as
+        | maplibregl.GeoJSONSource
+        | undefined;
+      ghostSource?.setData(EMPTY_FC);
+
+      const activeSource = map.getSource('active-route') as
+        | maplibregl.GeoJSONSource
+        | undefined;
+      activeSource?.setData(EMPTY_FC);
+
       if (puckRef.current) {
         puckRef.current.marker.getElement().style.display = 'none';
       }
@@ -974,44 +1156,15 @@ export function MapCanvas({
 
     visitHandlesRef.current = newHandles;
 
-    const snap = controller.getSnapshot();
-    if (snap) {
-      applyFrameToMap(snap);
-    }
-
-    chaseCameraRef.current.initialized = false;
-    const mode = cameraModeRef.current;
-    if (mode === 'OVERVIEW') {
-      map.fitBounds(trip.bounds, {
-        padding: {
-          top: 100,
-          bottom: 145,
-          left: sidebarOpenRef.current ? 360 : 72,
-          right: 310,
-        },
-        pitch: getCameraPitchForMode('OVERVIEW', settingsRef.current.enable3D),
-        bearing: 0,
-        duration: 850,
-        maxZoom: 15.5,
-      });
-    } else if ((mode === 'CHASE' || mode === 'DRONE') && snap) {
-      const targetZoom = getTargetZoomForFrame(snap, mode === 'DRONE');
-      const targetPitch = getCameraPitchForMode(mode, settingsRef.current.enable3D);
-      chaseCameraRef.current.zoom = targetZoom;
-      chaseCameraRef.current.bearing = snap.bearing;
-      chaseCameraRef.current.pitch = targetPitch;
-      chaseCameraRef.current.initialized = true;
-      chaseCameraRef.current.transitionUntilMs = performance.now() + 720;
-
-      map.easeTo({
-        center: [snap.lng, snap.lat],
-        zoom: targetZoom,
-        pitch: targetPitch,
-        bearing: snap.bearing,
-        duration: 700,
-      });
-    }
-  }, [trip, mapReady, controller, applyFrameToMap]);
+    runCorridorPreStaging(
+      map,
+      trip,
+      autoPlayRef.current,
+      settingsRef.current.enable3D
+        ? 'Staging 3D Corridor...'
+        : 'Staging Route Corridor...'
+    );
+  }, [trip, styleRevision, controller, runCorridorPreStaging]);
 
   // Live-update visit marker labels whenever geocoder resolves or user edits a nickname
   useEffect(() => {
@@ -1032,63 +1185,21 @@ export function MapCanvas({
     }
   }, [nicknames, geocodeCache]);
 
-  const applyCameraModeTransition = useCallback(
-    (nextMode: CameraMode) => {
-      const map = mapRef.current;
-      const currentTrip = tripRef.current;
-      if (!map || !styleLoadedRef.current || !currentTrip) return;
-
-      if (nextMode === 'OVERVIEW') {
-        map.fitBounds(currentTrip.bounds, {
-          padding: {
-            top: 100,
-            bottom: 145,
-            left: sidebarOpenRef.current ? 360 : 72,
-            right: 310,
-          },
-          pitch: getCameraPitchForMode('OVERVIEW', settingsRef.current.enable3D),
-          bearing: 0,
-          duration: 800,
-          maxZoom: 15.5,
-        });
-      } else if (nextMode === 'CHASE' || nextMode === 'DRONE') {
-        const snap = controller.getSnapshot();
-        if (snap) {
-          const targetZoom = getTargetZoomForFrame(snap, nextMode === 'DRONE');
-          const targetPitch = getCameraPitchForMode(
-            nextMode,
-            settingsRef.current.enable3D
-          );
-          chaseCameraRef.current.zoom = targetZoom;
-          chaseCameraRef.current.bearing = snap.bearing;
-          chaseCameraRef.current.pitch = targetPitch;
-          chaseCameraRef.current.initialized = true;
-          chaseCameraRef.current.transitionUntilMs = performance.now() + 620;
-
-          map.easeTo({
-            center: [snap.lng, snap.lat],
-            zoom: targetZoom,
-            pitch: targetPitch,
-            bearing: snap.bearing,
-            duration: 600,
-          });
-        }
-      }
-    },
-    [controller]
-  );
-
   const prevCameraModeRef = useRef<CameraMode>(cameraMode);
   const prevRecenterNonceRef = useRef<number>(recenterNonce);
   useEffect(() => {
+    const map = mapRef.current;
+    const currentTrip = tripRef.current;
     const modeChanged = prevCameraModeRef.current !== cameraMode;
     const recenterTriggered = prevRecenterNonceRef.current !== recenterNonce;
-    if (modeChanged || recenterTriggered) {
+    if ((modeChanged || recenterTriggered) && map && styleLoadedRef.current && currentTrip) {
       prevCameraModeRef.current = cameraMode;
       prevRecenterNonceRef.current = recenterNonce;
-      applyCameraModeTransition(cameraMode);
+      if (!isStagingRef.current) {
+        snapToActiveViewpoint(map, currentTrip, true);
+      }
     }
-  }, [cameraMode, recenterNonce, applyCameraModeTransition]);
+  }, [cameraMode, recenterNonce, snapToActiveViewpoint]);
 
   return (
     <div className="relative w-full h-full">

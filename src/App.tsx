@@ -7,6 +7,7 @@ import {
   Eye,
   Flame,
   Hand,
+  Loader2,
   Moon,
   Navigation2,
   Satellite,
@@ -30,6 +31,7 @@ import { AnimationController } from './engine/animationController';
 import type {
   AppSettings,
   CameraMode,
+  CorridorStagingState,
   MapStyleId,
   SpeedPreset,
   TelemetryFrame,
@@ -89,6 +91,12 @@ export default function App() {
   );
 
   const [frame, setFrame] = useState<TelemetryFrame | null>(null);
+  const [autoPlayOnReady, setAutoPlayOnReady] = useState(false);
+  const [staging, setStaging] = useState<CorridorStagingState>({
+    active: false,
+    percent: 0,
+    label: '',
+  });
   const [cameraMode, setCameraMode] = useState<CameraMode>('CHASE');
   const [recenterNonce, setRecenterNonce] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(() =>
@@ -175,7 +183,8 @@ export default function App() {
       setShowHeatmap(false);
       setHeatmapGeoJson(null);
       setCameraMode('CHASE');
-      controller.loadTrip(result.initialTrip, autoPlay);
+      setAutoPlayOnReady(autoPlay);
+      controller.loadTrip(result.initialTrip, false);
 
       if (typeof window !== 'undefined' && window.innerWidth < 768) {
         setSidebarOpen(false);
@@ -244,7 +253,8 @@ export default function App() {
         if (reqSeq !== tripFetchSeqRef.current || !trip) return;
         setActiveTrip(trip);
         setSelectedTripId(trip.id);
-        controller.loadTrip(trip, autoPlay);
+        setAutoPlayOnReady(autoPlay);
+        controller.loadTrip(trip, false);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Unable to load trip.';
         pushToast('error', 'Trip load failed', msg);
@@ -440,7 +450,7 @@ export default function App() {
             borderColor: settings.enable3D ? accent.border : 'transparent',
             color: settings.enable3D ? accent.text : '#94a3b8',
           }}
-          title="Toggle 3D Terrain & Extruded Buildings"
+          title="Toggle 3D Extruded Buildings"
         >
           <Box className="w-3 h-3" />
           <span>3D</span>
@@ -471,7 +481,7 @@ export default function App() {
       {
         id: 'DRONE',
         label: 'Drone',
-        title: 'Drone Chase (65° spline camera)',
+        title: 'Drone Chase (56° spline camera)',
         icon: <Video className="w-3.5 h-3.5" />,
       },
       {
@@ -551,6 +561,7 @@ export default function App() {
       <MapCanvas
         controller={controller}
         trip={activeTrip}
+        autoPlayOnReady={autoPlayOnReady}
         cameraMode={cameraMode}
         recenterNonce={recenterNonce}
         onCameraModeChange={setCameraMode}
@@ -560,8 +571,48 @@ export default function App() {
         heatmapGeoJson={heatmapGeoJson}
         nicknames={nicknames}
         geocodeCache={geocodeCache}
+        onStagingChange={setStaging}
         onMapError={handleMapError}
       />
+
+      {/* Corridor Pre-Staging Progress Overlay */}
+      {staging.active && (
+        <div
+          className={`fixed inset-x-0 top-24 sm:top-20 z-30 flex justify-center px-4 pointer-events-none transition-all duration-200 ${
+            sidebarOpen ? 'md:pl-[352px]' : ''
+          }`}
+        >
+          <div className="w-full max-w-xs rounded-2xl bg-slate-950/85 border border-white/15 backdrop-blur-md shadow-2xl px-4 py-3 space-y-2">
+            <div className="flex items-center justify-between gap-3 text-xs">
+              <span className="flex items-center gap-2 font-medium text-slate-100 truncate">
+                <Loader2
+                  className="w-3.5 h-3.5 animate-spin shrink-0"
+                  style={{ color: accent.primary }}
+                />
+                <span className="truncate">
+                  {staging.label || 'Staging 3D Corridor...'}
+                </span>
+              </span>
+              <span
+                className="font-mono tabular-nums text-[11px] font-semibold shrink-0"
+                style={{ color: accent.text }}
+              >
+                {Math.round(staging.percent)}%
+              </span>
+            </div>
+            <div className="h-1.5 w-full rounded-full bg-white/10 overflow-hidden">
+              <div
+                className="h-full rounded-full transition-all duration-200 ease-out"
+                style={{
+                  width: `${Math.max(4, Math.min(100, staging.percent))}%`,
+                  background: `linear-gradient(90deg, ${accent.primary}, ${accent.buttonBg})`,
+                  boxShadow: `0 0 12px ${accent.glow}`,
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Unified Top Safe-Area HUD Bar */}
       <header className="fixed top-0 left-0 right-0 z-20 px-3 pointer-events-none safe-top-hud">

@@ -1,12 +1,14 @@
 import type {
   PlaceVisit,
+  PrebakedColorStop,
+  PrebakedRoute,
   SpeedPreset,
   TelemetryFrame,
   TransportMode,
   Trip,
   TripSegment,
 } from '../types/timeline';
-import { clamp, computeBearing, lerp, lerpAngle } from '../utils/geo';
+import { clamp, computeBearing, lerp, lerpAngle, MODE_COLORS } from '../utils/geo';
 
 export const SPEED_PRESETS: SpeedPreset[] = [
   { kind: 'MULTIPLIER', multiplier: 1, label: '1x' },
@@ -19,6 +21,27 @@ export const SPEED_PRESETS: SpeedPreset[] = [
 ];
 
 export const DEFAULT_SPEED_PRESET: SpeedPreset = SPEED_PRESETS[5]; // Fit 30s
+
+// Throttle React HUD & scrubber updates to ~12fps (80ms) to keep WebGL 60fps smooth
+const HUD_THROTTLE_MS = 80;
+
+const MODE_LIST: TransportMode[] = [
+  'WALKING',
+  'DRIVING',
+  'CYCLING',
+  'TRANSIT',
+  'FLYING',
+  'STILL',
+];
+
+const MODE_TO_INDEX: Record<TransportMode, number> = {
+  WALKING: 0,
+  DRIVING: 1,
+  CYCLING: 2,
+  TRANSIT: 3,
+  FLYING: 4,
+  STILL: 5,
+};
 
 export type FrameListener = (frame: TelemetryFrame) => void;
 
@@ -34,8 +57,253 @@ function catmullRom(p0: number, p1: number, p2: number, p3: number, t: number): 
   );
 }
 
+/**
+ * Web Mercator projection helpers matching MapLibre's internal `line-progress`
+ * geometric distance metric so shader gradient cutoff aligns to the exact pixel
+ * under the moving location puck across all latitudes.
+ */
+function mercatorX(lng: number): number {
+  return (lng + 180) / 360;
+}
+
+function mercatorY(lat: number): number {
+  const clamped = clamp(lat, -85.051129, 85.051129);
+  const sin = Math.sin((clamped * Math.PI) / 180);
+  return 0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI);
+}
+
+interface BakedTimeline {
+  count: number;
+  times: Float64Array;
+  lats: Float64Array;
+  lngs: Float64Array;
+  bearings: Float64Array;
+  speeds: Float64Array;
+  cumDistM: Float64Array;
+  lineProgress: Float64Array;
+  modeIndices: Uint8Array;
+  sourceWpIndices: Int32Array;
+  route: PrebakedRoute;
+}
+
+/**
+ * Pre-bakes a Trip into a flat, spline-smoothed Float64Array lookup table and
+ * a single static GeoJSON LineString + strictly ascending color stops once on
+ * trip load so requestAnimationFrame performs zero allocations or spline math.
+ */
+export function prebakeTripTimeline(trip: Trip): BakedTimeline {
+  const waypoints = trip.waypoints;
+  const n = waypoints.length;
+
+  const timesList: number[] = [];
+  const latsList: number[] = [];
+  const lngsList: number[] = [];
+  const bearingsList: number[] = [];
+  const speedsList: number[] = [];
+  const cumDistList: number[] = [];
+  const modeList: number[] = [];
+  const srcWpList: number[] = [];
+
+  // Keep total baked vertices bounded (~2,500 max) for crisp mobile GPU rendering
+  const maxSubstepsPerSpan = n > 1200 ? 1 : n > 400 ? 2 : 4;
+
+  for (let i = 0; i < n; i++) {
+    const w0 = waypoints[i];
+
+    if (i === n - 1) {
+      timesList.push(w0.timestampMs);
+      latsList.push(w0.lat);
+      lngsList.push(w0.lng);
+      bearingsList.push(w0.bearing);
+      speedsList.push(w0.speedKmh);
+      cumDistList.push(w0.cumulativeDistanceM);
+      modeList.push(MODE_TO_INDEX[w0.mode]);
+      srcWpList.push(i);
+      break;
+    }
+
+    const w1 = waypoints[i + 1];
+    const spanMs = w1.timestampMs - w0.timestampMs;
+    const dLat = Math.abs(w1.lat - w0.lat);
+    const dLng = Math.abs(w1.lng - w0.lng);
+
+    const canSpline =
+      maxSubstepsPerSpan > 1 &&
+      w0.mode !== 'STILL' &&
+      w0.mode === w1.mode &&
+      spanMs > 0 &&
+      spanMs <= 5 * 60_000 &&
+      dLat < 0.15 &&
+      dLng < 0.15 &&
+      (dLat > 1e-6 || dLng > 1e-6);
+
+    const substeps = canSpline ? maxSubstepsPerSpan : 1;
+    const wPrev =
+      canSpline && i > 0 && waypoints[i - 1].mode === w0.mode ? waypoints[i - 1] : w0;
+    const wNext =
+      canSpline && i + 2 < n && waypoints[i + 2].mode === w1.mode ? waypoints[i + 2] : w1;
+
+    const padLat = Math.max(0.0001, dLat * 0.25);
+    const padLng = Math.max(0.0001, dLng * 0.25);
+    const minLat = Math.min(w0.lat, w1.lat) - padLat;
+    const maxLat = Math.max(w0.lat, w1.lat) + padLat;
+    const minLng = Math.min(w0.lng, w1.lng) - padLng;
+    const maxLng = Math.max(w0.lng, w1.lng) + padLng;
+
+    for (let s = 0; s < substeps; s++) {
+      const t = s / substeps;
+      let lat: number;
+      let lng: number;
+      let bearing: number;
+
+      if (canSpline && s > 0) {
+        lat = clamp(catmullRom(wPrev.lat, w0.lat, w1.lat, wNext.lat, t), minLat, maxLat);
+        lng = clamp(catmullRom(wPrev.lng, w0.lng, w1.lng, wNext.lng, t), minLng, maxLng);
+        const tA = Math.max(0, t - 0.04);
+        const tB = Math.min(1, t + 0.04);
+        const latA = catmullRom(wPrev.lat, w0.lat, w1.lat, wNext.lat, tA);
+        const lngA = catmullRom(wPrev.lng, w0.lng, w1.lng, wNext.lng, tA);
+        const latB = catmullRom(wPrev.lat, w0.lat, w1.lat, wNext.lat, tB);
+        const lngB = catmullRom(wPrev.lng, w0.lng, w1.lng, wNext.lng, tB);
+        bearing =
+          Math.abs(latB - latA) > 1e-7 || Math.abs(lngB - lngA) > 1e-7
+            ? computeBearing(latA, lngA, latB, lngB)
+            : lerpAngle(w0.bearing, w1.bearing, t);
+      } else {
+        lat = lerp(w0.lat, w1.lat, t);
+        lng = lerp(w0.lng, w1.lng, t);
+        bearing = w0.mode === 'STILL' ? w0.bearing : lerpAngle(w0.bearing, w1.bearing, t);
+      }
+
+      timesList.push(lerp(w0.timestampMs, w1.timestampMs, t));
+      latsList.push(lat);
+      lngsList.push(lng);
+      bearingsList.push(bearing);
+      speedsList.push(w0.mode === 'STILL' ? 0 : lerp(w0.speedKmh, w1.speedKmh, t));
+      cumDistList.push(lerp(w0.cumulativeDistanceM, w1.cumulativeDistanceM, t));
+      modeList.push(MODE_TO_INDEX[w0.mode]);
+      srcWpList.push(i);
+    }
+  }
+
+  const count = timesList.length;
+  const times = new Float64Array(timesList);
+  const lats = new Float64Array(latsList);
+  const lngs = new Float64Array(lngsList);
+  const bearings = new Float64Array(bearingsList);
+  const speeds = new Float64Array(speedsList);
+  const cumDistM = new Float64Array(cumDistList);
+  const modeIndices = new Uint8Array(modeList);
+  const sourceWpIndices = new Int32Array(srcWpList);
+
+  // Build deduplicated static GeoJSON coordinates + Mercator line-progress table
+  const lineProgress = new Float64Array(count);
+  const mercCum = new Float64Array(count);
+  const coords: [number, number][] = [];
+  const coordModes: TransportMode[] = [];
+  const coordMercDist: number[] = [];
+
+  let totalMercLen = 0;
+  let prevMx = count > 0 ? mercatorX(lngs[0]) : 0;
+  let prevMy = count > 0 ? mercatorY(lats[0]) : 0;
+
+  if (count > 0) {
+    coords.push([lngs[0], lats[0]]);
+    coordModes.push(MODE_LIST[modeIndices[0]]);
+    coordMercDist.push(0);
+  }
+
+  for (let i = 1; i < count; i++) {
+    const mx = mercatorX(lngs[i]);
+    const my = mercatorY(lats[i]);
+    const segLen = Math.hypot(mx - prevMx, my - prevMy);
+    totalMercLen += segLen;
+    mercCum[i] = totalMercLen;
+
+    if (segLen > 1e-10) {
+      coords.push([lngs[i], lats[i]]);
+      coordModes.push(MODE_LIST[modeIndices[i]]);
+      coordMercDist.push(totalMercLen);
+      prevMx = mx;
+      prevMy = my;
+    }
+  }
+
+  if (totalMercLen > 0) {
+    for (let i = 0; i < count; i++) {
+      lineProgress[i] = mercCum[i] / totalMercLen;
+    }
+  }
+
+  // Build strictly ascending color stops matching transport mode transitions
+  const colorStops: PrebakedColorStop[] = [];
+  if (coords.length >= 2 && totalMercLen > 0) {
+    const firstColor = MODE_COLORS[coordModes[0]];
+    colorStops.push({ progress: 0, color: firstColor });
+    let prevColor = firstColor;
+    let lastStopP = 0;
+
+    for (let i = 1; i < coords.length; i++) {
+      const modeColor = MODE_COLORS[coordModes[i]];
+      if (modeColor !== prevColor) {
+        const p = coordMercDist[i - 1] / totalMercLen;
+        const holdP = Math.max(lastStopP + 0.00002, p);
+        const stepP = Math.min(1, holdP + 0.00005);
+        if (holdP < 0.9999) {
+          colorStops.push({ progress: holdP, color: prevColor });
+          colorStops.push({ progress: stepP, color: modeColor });
+          lastStopP = stepP;
+          prevColor = modeColor;
+        }
+      }
+    }
+
+    if (lastStopP < 1) {
+      colorStops.push({ progress: 1, color: prevColor });
+    }
+  }
+
+  const hasGeometry = coords.length >= 2 && totalMercLen > 0;
+  const geojson: GeoJSON.FeatureCollection = hasGeometry
+    ? {
+        type: 'FeatureCollection',
+        features: [
+          {
+            type: 'Feature',
+            properties: {},
+            geometry: {
+              type: 'LineString',
+              coordinates: coords,
+            },
+          },
+        ],
+      }
+    : { type: 'FeatureCollection', features: [] };
+
+  return {
+    count,
+    times,
+    lats,
+    lngs,
+    bearings,
+    speeds,
+    cumDistM,
+    lineProgress,
+    modeIndices,
+    sourceWpIndices,
+    route: {
+      tripId: trip.id,
+      geojson,
+      colorStops,
+      pointCount: coords.length,
+      hasGeometry,
+    },
+  };
+}
+
 export class AnimationController {
   private trip: Trip | null = null;
+  private baked: BakedTimeline | null = null;
   private isPlaying = false;
   private loop = false;
   private currentTimeMs = 0;
@@ -70,9 +338,10 @@ export class AnimationController {
     };
   }
 
-  public loadTrip(trip: Trip | null, autoPlay = false): void {
+  public loadTrip(trip: Trip | null, autoPlay = false): PrebakedRoute | null {
     this.stopRaf();
     this.trip = trip;
+    this.baked = trip ? prebakeTripTimeline(trip) : null;
     this.isPlaying = false;
     this.hasSmoothed = false;
 
@@ -86,6 +355,12 @@ export class AnimationController {
         this.play();
       }
     }
+
+    return this.baked?.route ?? null;
+  }
+
+  public getPrebakedRoute(): PrebakedRoute | null {
+    return this.baked?.route ?? null;
   }
 
   public play(): void {
@@ -184,6 +459,7 @@ export class AnimationController {
     this.frameListeners.clear();
     this.hudListeners.clear();
     this.trip = null;
+    this.baked = null;
   }
 
   private startRaf(): void {
@@ -218,7 +494,7 @@ export class AnimationController {
       const frame = this.computeFrame(reachedEnd, dtRealMs / 1000);
       if (frame) {
         const shouldEmitHud =
-          reachedEnd || nowMs - this.lastHudEmitTimeMs >= 48;
+          reachedEnd || nowMs - this.lastHudEmitTimeMs >= HUD_THROTTLE_MS;
         if (shouldEmitHud) {
           this.lastHudEmitTimeMs = nowMs;
         }
@@ -300,31 +576,38 @@ export class AnimationController {
     snapSmoothing: boolean,
     dtRealSec: number
   ): TelemetryFrame | null {
-    if (!this.trip || this.trip.waypoints.length === 0) return null;
+    if (!this.trip || !this.baked || this.baked.count === 0) return null;
 
-    const waypoints = this.trip.waypoints;
+    const b = this.baked;
     const totalDuration = Math.max(1, this.trip.endTimeMs - this.trip.startTimeMs);
     const tMs = clamp(this.currentTimeMs, this.trip.startTimeMs, this.trip.endTimeMs);
     const progress = clamp((tMs - this.trip.startTimeMs) / totalDuration, 0, 1);
 
+    // O(log N) binary search over pre-baked Float64Array timestamps (zero allocations)
     let lo = 0;
-    let hi = waypoints.length - 1;
+    let hi = b.count - 1;
     while (lo < hi) {
       const mid = (lo + hi + 1) >>> 1;
-      if (waypoints[mid].timestampMs <= tMs) {
+      if (b.times[mid] <= tMs) {
         lo = mid;
       } else {
         hi = mid - 1;
       }
     }
 
-    const idx0 = lo;
-    const idx1 = Math.min(waypoints.length - 1, idx0 + 1);
-    const w0 = waypoints[idx0];
-    const w1 = waypoints[idx1];
+    const i0 = lo;
+    const i1 = i0 + 1 < b.count ? i0 + 1 : i0;
+    const spanMs = b.times[i1] - b.times[i0];
+    const localT = spanMs > 0 ? clamp((tMs - b.times[i0]) / spanMs, 0, 1) : 0;
 
-    const spanMs = w1.timestampMs - w0.timestampMs;
-    const localT = spanMs > 0 ? clamp((tMs - w0.timestampMs) / spanMs, 0, 1) : 0;
+    const lat = lerp(b.lats[i0], b.lats[i1], localT);
+    const lng = lerp(b.lngs[i0], b.lngs[i1], localT);
+    const cumulativeDistanceM = lerp(b.cumDistM[i0], b.cumDistM[i1], localT);
+    const lineProgress = clamp(
+      lerp(b.lineProgress[i0], b.lineProgress[i1], localT),
+      0,
+      1
+    );
 
     const activeSegmentIndex = this.findSegmentIndex(tMs);
     const activeSegment: TripSegment | null =
@@ -334,70 +617,14 @@ export class AnimationController {
 
     const mode: TransportMode = activeVisit
       ? 'STILL'
-      : activeSegment?.mode ?? w0.mode;
+      : activeSegment?.mode ?? MODE_LIST[b.modeIndices[i0]];
 
-    let lat = lerp(w0.lat, w1.lat, localT);
-    let lng = lerp(w0.lng, w1.lng, localT);
-    let rawBearing =
-      mode === 'STILL' ? w0.bearing : lerpAngle(w0.bearing, w1.bearing, localT);
-
-    // Smooth Catmull-Rom spline interpolation for continuous movement spans
-    const dLat = Math.abs(w1.lat - w0.lat);
-    const dLng = Math.abs(w1.lng - w0.lng);
-    if (
-      mode !== 'STILL' &&
-      w0.mode === w1.mode &&
-      spanMs > 0 &&
-      spanMs <= 5 * 60_000 &&
-      dLat < 0.15 &&
-      dLng < 0.15 &&
-      (dLat > 1e-6 || dLng > 1e-6)
-    ) {
-      const wPrev =
-        idx0 > 0 && waypoints[idx0 - 1].mode === w0.mode ? waypoints[idx0 - 1] : w0;
-      const wNext =
-        idx1 + 1 < waypoints.length && waypoints[idx1 + 1].mode === w1.mode
-          ? waypoints[idx1 + 1]
-          : w1;
-
-      const sLat = catmullRom(wPrev.lat, w0.lat, w1.lat, wNext.lat, localT);
-      const sLng = catmullRom(wPrev.lng, w0.lng, w1.lng, wNext.lng, localT);
-
-      const padLat = Math.max(0.0001, dLat * 0.25);
-      const padLng = Math.max(0.0001, dLng * 0.25);
-      lat = clamp(
-        sLat,
-        Math.min(w0.lat, w1.lat) - padLat,
-        Math.max(w0.lat, w1.lat) + padLat
-      );
-      lng = clamp(
-        sLng,
-        Math.min(w0.lng, w1.lng) - padLng,
-        Math.max(w0.lng, w1.lng) + padLng
-      );
-
-      // Smooth tangent bearing along spline curve
-      const eps = 0.03;
-      const tA = Math.max(0, localT - eps);
-      const tB = Math.min(1, localT + eps);
-      if (tB > tA) {
-        const latA = catmullRom(wPrev.lat, w0.lat, w1.lat, wNext.lat, tA);
-        const lngA = catmullRom(wPrev.lng, w0.lng, w1.lng, wNext.lng, tA);
-        const latB = catmullRom(wPrev.lat, w0.lat, w1.lat, wNext.lat, tB);
-        const lngB = catmullRom(wPrev.lng, w0.lng, w1.lng, wNext.lng, tB);
-        if (Math.abs(latB - latA) > 1e-7 || Math.abs(lngB - lngA) > 1e-7) {
-          rawBearing = computeBearing(latA, lngA, latB, lngB);
-        }
-      }
-    }
-
-    const cumulativeDistanceM = lerp(
-      w0.cumulativeDistanceM,
-      w1.cumulativeDistanceM,
-      localT
-    );
+    const rawBearing =
+      mode === 'STILL'
+        ? b.bearings[i0]
+        : lerpAngle(b.bearings[i0], b.bearings[i1], localT);
     const rawSpeedKmh =
-      mode === 'STILL' ? 0 : lerp(w0.speedKmh, w1.speedKmh, localT);
+      mode === 'STILL' ? 0 : lerp(b.speeds[i0], b.speeds[i1], localT);
 
     if (snapSmoothing || !this.hasSmoothed || dtRealSec <= 0) {
       this.smoothedBearing = rawBearing;
@@ -428,6 +655,7 @@ export class AnimationController {
       startTimeMs: this.trip.startTimeMs,
       endTimeMs: this.trip.endTimeMs,
       progress,
+      lineProgress,
       lat,
       lng,
       bearing: this.smoothedBearing,
@@ -439,7 +667,7 @@ export class AnimationController {
       activeSegment,
       activeVisit,
       activeVisitProgress,
-      traveledWaypointIndex: idx0,
+      traveledWaypointIndex: b.sourceWpIndices[i0],
       speedPreset: this.speedPreset,
       effectiveMultiplier: this.getEffectiveMultiplier(),
     };

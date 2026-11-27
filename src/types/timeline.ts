@@ -174,6 +174,25 @@ export type SpeedPreset =
   | { kind: 'MULTIPLIER'; multiplier: 1 | 10 | 60 | 300; label: string }
   | { kind: 'FIT_DURATION'; seconds: 15 | 30 | 60; label: string };
 
+export interface PrebakedColorStop {
+  progress: number; // 0..1 normalized geometric progress along baked LineString
+  color: string;
+}
+
+export interface PrebakedRoute {
+  tripId: string;
+  geojson: GeoJSON.FeatureCollection;
+  colorStops: PrebakedColorStop[];
+  pointCount: number;
+  hasGeometry: boolean;
+}
+
+export interface CorridorStagingState {
+  active: boolean;
+  percent: number;
+  label: string;
+}
+
 export interface TelemetryFrame {
   tripId: string;
   isPlaying: boolean;
@@ -182,6 +201,7 @@ export interface TelemetryFrame {
   startTimeMs: number;
   endTimeMs: number;
   progress: number;
+  lineProgress: number; // 0..1 geometric distance ratio matching MapLibre line-progress
   lat: number;
   lng: number;
   bearing: number;

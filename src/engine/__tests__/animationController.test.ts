@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createSampleTimelineJson } from '../../data/sampleJourney';
 import { lerpAngle } from '../../utils/geo';
+import { buildLineGradientExpression } from '../../utils/lineGradient';
 import { parseTimelineText } from '../../workers/timelineParser';
 import {
   AnimationController,
@@ -140,6 +141,62 @@ describe('AnimationController 60fps playback and telemetry', () => {
     expect(loopSnap.progress).toBeLessThan(0.5);
 
     expect(hudFrames.length).toBeGreaterThan(3);
+
+    // Pre-baked route geometry & monotonic lineProgress verification
+    const prebaked = controller.getPrebakedRoute();
+    expect(prebaked).not.toBeNull();
+    expect(prebaked!.hasGeometry).toBe(true);
+    expect(prebaked!.geojson.features.length).toBe(1);
+    expect(prebaked!.colorStops.length).toBeGreaterThan(1);
+
+    let prevLineProgress = -1;
+    for (const p of [0, 0.15, 0.35, 0.65, 0.85, 1]) {
+      controller.seekToProgress(p);
+      const snap = controller.getSnapshot()!;
+      expect(snap.lineProgress).toBeGreaterThanOrEqual(prevLineProgress);
+      expect(snap.lineProgress).toBeLessThanOrEqual(1);
+      prevLineProgress = snap.lineProgress;
+    }
+    expect(prevLineProgress).toBeCloseTo(1, 5);
+
+    controller.destroy();
+  });
+});
+
+describe('buildLineGradientExpression MapLibre stop monotonicity', () => {
+  it('always emits strictly ascending stops across all edge cutoffs', () => {
+    const parsed = parseTimelineText(createSampleTimelineJson());
+    const controller = new AnimationController();
+    controller.loadTrip(parsed.trips[0], false);
+    const stops = controller.getPrebakedRoute()!.colorStops;
+
+    const cutoffs = [0, 0.0001, 0.0005, 0.12, 0.5, 0.999, 0.9995, 0.9998, 1];
+    for (const cutoff of cutoffs) {
+      for (const override of [undefined, '#22d3ee']) {
+        const expr = buildLineGradientExpression(stops, cutoff, override);
+        expect(expr.slice(0, 3)).toEqual([
+          'interpolate',
+          ['linear'],
+          ['line-progress'],
+        ]);
+        const pairs = expr.slice(3);
+        expect(pairs.length % 2).toBe(0);
+        expect(pairs.length).toBeGreaterThanOrEqual(4);
+
+        let lastStop = -1;
+        for (let i = 0; i < pairs.length; i += 2) {
+          const stopVal = pairs[i] as number;
+          const colorVal = pairs[i + 1] as string;
+          expect(typeof stopVal).toBe('number');
+          expect(typeof colorVal).toBe('string');
+          expect(stopVal).toBeGreaterThan(lastStop);
+          expect(stopVal).toBeGreaterThanOrEqual(0);
+          expect(stopVal).toBeLessThanOrEqual(1);
+          lastStop = stopVal;
+        }
+      }
+    }
+
     controller.destroy();
   });
 });

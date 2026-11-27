@@ -44,6 +44,7 @@ export function PlaybackDock({
 }: PlaybackDockProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const [hoverProgress, setHoverProgress] = useState<number | null>(null);
+  const [dragProgress, setDragProgress] = useState<number | null>(null);
   const isScrubbingRef = useRef(false);
 
   const computeProgressFromClientX = useCallback((clientX: number): number => {
@@ -59,17 +60,20 @@ export function PlaybackDock({
     e.preventDefault();
     isScrubbingRef.current = true;
     const p = computeProgressFromClientX(e.clientX);
+    setDragProgress(p);
     onSeekProgress(p);
 
     const onMove = (ev: PointerEvent) => {
       if (!isScrubbingRef.current) return;
       const mp = computeProgressFromClientX(ev.clientX);
       setHoverProgress(mp);
+      setDragProgress(mp);
       onSeekProgress(mp);
     };
 
     const onUp = () => {
       isScrubbingRef.current = false;
+      setDragProgress(null);
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
     };
@@ -79,6 +83,8 @@ export function PlaybackDock({
   };
 
   if (!trip || !frame) return null;
+
+  const displayProgress = dragProgress ?? frame.progress;
 
   const accent = ACCENT_THEMES[accentTheme];
   const totalSpan = Math.max(1, trip.endTimeMs - trip.startTimeMs);
@@ -142,7 +148,7 @@ export function PlaybackDock({
           aria-label="Timeline playback position"
           aria-valuemin={0}
           aria-valuemax={100}
-          aria-valuenow={Math.round(frame.progress * 100)}
+          aria-valuenow={Math.round(displayProgress * 100)}
           tabIndex={0}
           className="relative h-7 flex items-center cursor-pointer group select-none touch-none"
         >
@@ -192,7 +198,7 @@ export function PlaybackDock({
 
             <div
               className="absolute top-0 right-0 bottom-0 bg-slate-950/65 pointer-events-none"
-              style={{ left: `${frame.progress * 100}%` }}
+              style={{ left: `${displayProgress * 100}%` }}
             />
           </div>
 
@@ -209,7 +215,7 @@ export function PlaybackDock({
 
           <div
             style={{
-              left: `${frame.progress * 100}%`,
+              left: `${displayProgress * 100}%`,
               boxShadow: `0 0 12px ${accent.primary}`,
               borderColor: accent.primary,
             }}
