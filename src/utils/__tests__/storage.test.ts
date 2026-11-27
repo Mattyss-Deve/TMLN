@@ -6,8 +6,8 @@ import {
 } from '../storage';
 
 describe('Versioning & Starred Discovery Storage', () => {
-  it('exports semantic APP_VERSION matching v1.3.0', () => {
-    expect(APP_VERSION).toBe('v1.3.0');
+  it('exports semantic APP_VERSION matching v1.4.0', () => {
+    expect(APP_VERSION).toBe('v1.4.0');
   });
 
   it('toggles starred trip IDs idempotently and prepends newly starred items', () => {

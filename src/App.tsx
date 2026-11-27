@@ -658,6 +658,29 @@ export default function App() {
     [controller]
   );
 
+  // Swipe left/right on PlaybackDock jumps to next (+1 newer) or previous (-1 older) day/journey
+  const handleStepTrip = useCallback(
+    (delta: -1 | 1) => {
+      if (!summaryIndex || !selectedTripId) return;
+      const list = viewMode === 'DAY' ? summaryIndex.days : summaryIndex.journeys;
+      if (list.length <= 1) return;
+      const curIdx = list.findIndex((item) => item.id === selectedTripId);
+      if (curIdx === -1) return;
+      // List is newest-first: delta +1 (next chronological) moves toward index 0
+      const nextIdx = curIdx - delta;
+      if (nextIdx < 0 || nextIdx >= list.length) {
+        pushToast(
+          'info',
+          delta > 0 ? 'Already at latest entry' : 'Already at earliest entry'
+        );
+        return;
+      }
+      const nextItem = list[nextIdx];
+      void loadTripFromWorker(nextItem.id, viewMode, false);
+    },
+    [summaryIndex, selectedTripId, viewMode, loadTripFromWorker, pushToast]
+  );
+
   const handleSelectSpeed = useCallback(
     (preset: SpeedPreset) => {
       controller.setSpeedPreset(preset);
@@ -1203,6 +1226,7 @@ export default function App() {
           onTogglePlay={handleTogglePlay}
           onSeekProgress={handleSeekProgress}
           onStepSegment={handleStepSegment}
+          onStepTrip={handleStepTrip}
           onSelectSpeed={handleSelectSpeed}
           onToggleLoop={handleToggleLoop}
           onExportPostcard={() => void handleExportPostcard()}

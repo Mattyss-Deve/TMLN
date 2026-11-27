@@ -1,8 +1,9 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Camera,
   Film,
   Loader2,
+  MoreHorizontal,
   Pause,
   Play,
   Repeat,
@@ -24,8 +25,16 @@ import {
   formatShortTime,
 } from '../utils/format';
 import { clamp, lerp, MODE_COLORS, MODE_LABELS } from '../utils/geo';
-import { resetCrownDetent, triggerCrownTick } from '../utils/haptics';
+import {
+  resetCrownDetent,
+  triggerCrownTick,
+  triggerSegmentPulse,
+} from '../utils/haptics';
 import { ACCENT_THEMES } from '../utils/settings';
+
+const SPARKLINE_BUCKETS = 72;
+const SPARKLINE_W = 360;
+const SPARKLINE_H = 26;
 
 interface PlaybackDockProps {
   trip: Trip | null;
@@ -36,12 +45,98 @@ interface PlaybackDockProps {
   onTogglePlay: () => void;
   onSeekProgress: (progress: number) => void;
   onStepSegment: (delta: -1 | 1) => void;
+  onStepTrip?: (delta: -1 | 1) => void;
   onSelectSpeed: (preset: SpeedPreset) => void;
   onToggleLoop: () => void;
   onExportPostcard: () => void;
   isExportingPostcard: boolean;
   onExportReel: () => void;
   isExportingReel: boolean;
+}
+
+/**
+ * Builds an SVG velocity waveform path and stationary dwell rectangles
+ * across the trip's time window using log-compressed speeds so walking,
+ * driving, and flights are all clearly legible together.
+ */
+function buildVelocitySparkline(trip: Trip): {
+  areaPath: string;
+  linePath: string;
+  dwellBlocks: Array<{ x: number; width: number }>;
+} {
+  const totalSpan = Math.max(1, trip.endTimeMs - trip.startTimeMs);
+  const bucketMaxSpeed = new Float32Array(SPARKLINE_BUCKETS);
+
+  for (let i = 0; i < trip.waypoints.length; i++) {
+    const wp = trip.waypoints[i];
+    const ratio = clamp((wp.timestampMs - trip.startTimeMs) / totalSpan, 0, 0.9999);
+    const idx = Math.floor(ratio * SPARKLINE_BUCKETS);
+    const spd = wp.mode === 'STILL' ? 0 : Math.max(0, wp.speedKmh);
+    if (spd > bucketMaxSpeed[idx]) {
+      bucketMaxSpeed[idx] = spd;
+    }
+  }
+
+  // Fallback fill from segment average speeds for sparse synthetic segments
+  for (const seg of trip.segments) {
+    if (seg.kind === 'VISIT' || seg.mode === 'STILL') continue;
+    const startB = clamp(
+      Math.floor(((seg.startTimeMs - trip.startTimeMs) / totalSpan) * SPARKLINE_BUCKETS),
+      0,
+      SPARKLINE_BUCKETS - 1
+    );
+    const endB = clamp(
+      Math.floor(((seg.endTimeMs - trip.startTimeMs) / totalSpan) * SPARKLINE_BUCKETS),
+      0,
+      SPARKLINE_BUCKETS - 1
+    );
+    for (let b = startB; b <= endB; b++) {
+      if (bucketMaxSpeed[b] < seg.avgSpeedKmh * 0.6) {
+        bucketMaxSpeed[b] = seg.avgSpeedKmh;
+      }
+    }
+  }
+
+  // Log-compress speeds so walking (~5km/h) & driving (~90km/h) both show clear structure
+  let peakCompressed = 0.001;
+  const compressed = new Float32Array(SPARKLINE_BUCKETS);
+  for (let i = 0; i < SPARKLINE_BUCKETS; i++) {
+    const v = Math.log1p(bucketMaxSpeed[i]);
+    compressed[i] = v;
+    if (v > peakCompressed) peakCompressed = v;
+  }
+
+  // Light 3-tap smoothing for clean organic waveform
+  const pts: Array<[number, number]> = [];
+  for (let i = 0; i < SPARKLINE_BUCKETS; i++) {
+    const prev = compressed[Math.max(0, i - 1)];
+    const cur = compressed[i];
+    const next = compressed[Math.min(SPARKLINE_BUCKETS - 1, i + 1)];
+    const smoothed = (prev + cur * 2 + next) * 0.25;
+    const norm = clamp(smoothed / peakCompressed, 0, 1);
+    const x = (i / (SPARKLINE_BUCKETS - 1)) * SPARKLINE_W;
+    const y = SPARKLINE_H - 3 - norm * (SPARKLINE_H - 6);
+    pts.push([Number(x.toFixed(1)), Number(y.toFixed(1))]);
+  }
+
+  let linePath = `M ${pts[0][0]} ${pts[0][1]}`;
+  for (let i = 1; i < pts.length; i++) {
+    linePath += ` L ${pts[i][0]} ${pts[i][1]}`;
+  }
+  const areaPath = `${linePath} L ${SPARKLINE_W} ${SPARKLINE_H} L 0 ${SPARKLINE_H} Z`;
+
+  const dwellBlocks = trip.segments
+    .filter((s) => s.kind === 'VISIT')
+    .map((s) => {
+      const leftRatio = clamp((s.startTimeMs - trip.startTimeMs) / totalSpan, 0, 1);
+      const widthRatio = clamp((s.endTimeMs - s.startTimeMs) / totalSpan, 0.008, 1);
+      return {
+        x: Number((leftRatio * SPARKLINE_W).toFixed(1)),
+        width: Number((widthRatio * SPARKLINE_W).toFixed(1)),
+      };
+    });
+
+  return { areaPath, linePath, dwellBlocks };
 }
 
 export function PlaybackDock({
@@ -53,6 +148,7 @@ export function PlaybackDock({
   onTogglePlay,
   onSeekProgress,
   onStepSegment,
+  onStepTrip,
   onSelectSpeed,
   onToggleLoop,
   onExportPostcard,
@@ -61,9 +157,34 @@ export function PlaybackDock({
   isExportingReel,
 }: PlaybackDockProps) {
   const trackRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const dockSwipeRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+  } | null>(null);
+
   const [hoverProgress, setHoverProgress] = useState<number | null>(null);
   const [dragProgress, setDragProgress] = useState<number | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
   const isScrubbingRef = useRef(false);
+
+  // Close overflow popover on outside click
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    window.addEventListener('pointerdown', onDown);
+    return () => window.removeEventListener('pointerdown', onDown);
+  }, [menuOpen]);
+
+  const sparkline = useMemo(
+    () => (trip ? buildVelocitySparkline(trip) : null),
+    [trip]
+  );
 
   const computeProgressFromClientX = useCallback((clientX: number): number => {
     const el = trackRef.current;
@@ -73,9 +194,10 @@ export function PlaybackDock({
     return clamp((clientX - rect.left) / rect.width, 0, 1);
   }, []);
 
-  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+  const handleTrackPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!trip) return;
     e.preventDefault();
+    e.stopPropagation();
     isScrubbingRef.current = true;
     const p = computeProgressFromClientX(e.clientX);
     setDragProgress(p);
@@ -101,6 +223,31 @@ export function PlaybackDock({
 
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+  };
+
+  // Swipe-left / swipe-right on dock body (outside scrubber) to jump to previous/next day
+  const handleDockPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!onStepTrip || !e.isPrimary) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('[role="slider"], button, input')) return;
+    dockSwipeRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+    };
+  };
+
+  const handleDockPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const swipe = dockSwipeRef.current;
+    if (!swipe || swipe.pointerId !== e.pointerId || !onStepTrip) return;
+    dockSwipeRef.current = null;
+    const dx = e.clientX - swipe.startX;
+    const dy = e.clientY - swipe.startY;
+    if (Math.abs(dx) >= 54 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+      triggerSegmentPulse();
+      // Swipe left -> next chronological day (+1); swipe right -> previous day (-1)
+      onStepTrip(dx < 0 ? 1 : -1);
+    }
   };
 
   if (!trip || !frame) return null;
@@ -129,6 +276,8 @@ export function PlaybackDock({
         : false;
   };
 
+  const hasOverflowIndicator = frame.loop || isExportingPostcard || isExportingReel;
+
   return (
     <div
       style={{ bottom: 'max(env(safe-area-inset-bottom, 0px), 12px)' }}
@@ -136,9 +285,19 @@ export function PlaybackDock({
         sidebarOpen ? 'left-3 md:left-[356px]' : 'left-3'
       }`}
     >
-      <div className="pointer-events-auto w-full max-w-[740px] instrument-surface rounded-xl px-3.5 py-2.5 space-y-2">
-        {/* Top Row: Route Title & Elapsed Window */}
-        <div className="flex items-center justify-between gap-3 text-xs">
+      <div
+        onPointerDown={handleDockPointerDown}
+        onPointerUp={handleDockPointerUp}
+        onPointerCancel={() => {
+          dockSwipeRef.current = null;
+        }}
+        className="pointer-events-auto w-full max-w-[700px] instrument-surface rounded-xl px-3.5 py-2.5 space-y-2"
+      >
+        {/* Top Row: Route Title (swipe left/right here to switch days) & Time Window */}
+        <div
+          className="flex items-center justify-between gap-3 text-xs select-none"
+          title="Swipe left or right on the dock to jump to the previous or next day"
+        >
           <div className="flex items-center gap-2 min-w-0">
             <span className="font-medium text-slate-100 truncate">
               {trip.title}
@@ -156,10 +315,10 @@ export function PlaybackDock({
           </div>
         </div>
 
-        {/* Interactive Scrubber Track */}
+        {/* Velocity & Dwell Sparkline Scrubber */}
         <div
           ref={trackRef}
-          onPointerDown={handlePointerDown}
+          onPointerDown={handleTrackPointerDown}
           onPointerMove={(e) => setHoverProgress(computeProgressFromClientX(e.clientX))}
           onPointerLeave={() => {
             if (!isScrubbingRef.current) setHoverProgress(null);
@@ -170,7 +329,7 @@ export function PlaybackDock({
           aria-valuemax={100}
           aria-valuenow={Math.round(displayProgress * 100)}
           tabIndex={0}
-          className="relative h-6 flex items-center cursor-pointer group select-none touch-none"
+          className="relative h-8 flex items-center cursor-pointer group select-none touch-none"
         >
           {hoverProgress !== null && hoverTimeMs !== null && (
             <div
@@ -193,56 +352,88 @@ export function PlaybackDock({
             </div>
           )}
 
-          <div className="relative w-full h-2 rounded-full bg-white/[0.08] overflow-hidden flex">
-            {trip.segments.map((seg) => {
-              const leftPct = ((seg.startTimeMs - trip.startTimeMs) / totalSpan) * 100;
-              const widthPct = Math.max(
-                0.6,
-                ((seg.endTimeMs - seg.startTimeMs) / totalSpan) * 100
-              );
-              const color = MODE_COLORS[seg.mode];
-              return (
-                <div
-                  key={seg.id}
-                  style={{
-                    position: 'absolute',
-                    left: `${leftPct}%`,
-                    width: `${widthPct}%`,
-                    backgroundColor: color,
-                    opacity: seg.kind === 'VISIT' ? 0.3 : 0.82,
-                  }}
-                  className="h-full border-r border-[#0B0E14]/60"
+          {/* Sparkline + Mode Ribbon Container */}
+          <div className="relative w-full h-7 rounded-lg bg-white/[0.04] border border-white/[0.07] overflow-hidden">
+            {/* SVG Velocity Waveform & Dwell Blocks */}
+            {sparkline && (
+              <svg
+                viewBox={`0 0 ${SPARKLINE_W} ${SPARKLINE_H}`}
+                preserveAspectRatio="none"
+                className="absolute inset-0 w-full h-full pointer-events-none"
+                aria-hidden="true"
+              >
+                {/* Stationary dwell blocks */}
+                {sparkline.dwellBlocks.map((b, idx) => (
+                  <rect
+                    key={idx}
+                    x={b.x}
+                    y={SPARKLINE_H - 8}
+                    width={b.width}
+                    height={8}
+                    fill="rgba(52, 211, 153, 0.22)"
+                  />
+                ))}
+                {/* Velocity waveform fill & crisp stroke */}
+                <path
+                  d={sparkline.areaPath}
+                  fill={accent.primary}
+                  fillOpacity="0.22"
                 />
-              );
-            })}
+                <path
+                  d={sparkline.linePath}
+                  fill="none"
+                  stroke={accent.primary}
+                  strokeWidth="1.25"
+                  strokeOpacity="0.82"
+                />
+              </svg>
+            )}
 
+            {/* Bottom Mode Color Strip */}
+            <div className="absolute left-0 right-0 bottom-0 h-1.5 flex">
+              {trip.segments.map((seg) => {
+                const leftPct = ((seg.startTimeMs - trip.startTimeMs) / totalSpan) * 100;
+                const widthPct = Math.max(
+                  0.6,
+                  ((seg.endTimeMs - seg.startTimeMs) / totalSpan) * 100
+                );
+                const color = MODE_COLORS[seg.mode];
+                return (
+                  <div
+                    key={seg.id}
+                    style={{
+                      position: 'absolute',
+                      left: `${leftPct}%`,
+                      width: `${widthPct}%`,
+                      backgroundColor: color,
+                      opacity: seg.kind === 'VISIT' ? 0.35 : 0.88,
+                    }}
+                    className="h-full border-r border-[#0B0E14]/60"
+                  />
+                );
+              })}
+            </div>
+
+            {/* Unplayed Right Curtain */}
             <div
               className="absolute top-0 right-0 bottom-0 bg-[#0B0E14]/68 pointer-events-none"
               style={{ left: `${displayProgress * 100}%` }}
             />
           </div>
 
-          {trip.visits.map((v) => {
-            const posPct = ((v.startTimeMs - trip.startTimeMs) / totalSpan) * 100;
-            return (
-              <div
-                key={v.id}
-                style={{ left: `${posPct}%` }}
-                className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 w-1 h-3 rounded-full bg-white/70 ring-1 ring-[#0B0E14] pointer-events-none"
-              />
-            );
-          })}
-
+          {/* Crisp Vertical Playhead Needle */}
           <div
-            style={{
-              left: `${displayProgress * 100}%`,
-              borderColor: accent.primary,
-            }}
-            className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full bg-white border-2 group-hover:scale-110 transition-transform pointer-events-none"
-          />
+            style={{ left: `${displayProgress * 100}%` }}
+            className="absolute top-0.5 bottom-0.5 -translate-x-1/2 w-[2px] bg-white rounded-full pointer-events-none"
+          >
+            <div
+              style={{ borderColor: accent.primary }}
+              className="absolute -top-0.5 left-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-white border-2 group-hover:scale-110 transition-transform"
+            />
+          </div>
         </div>
 
-        {/* Bottom Instrument Controls */}
+        {/* Bottom Sleek Instrument Controls */}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-1">
             <button
@@ -289,52 +480,107 @@ export function PlaybackDock({
               <SkipForward className="w-3.5 h-3.5" />
             </button>
 
-            <button
-              type="button"
-              onClick={onToggleLoop}
-              className="p-2 rounded-lg border active:scale-[0.98] transition-all"
-              style={{
-                backgroundColor: frame.loop ? accent.softBg : 'rgba(255,255,255,0.03)',
-                borderColor: frame.loop ? accent.border : 'rgba(255,255,255,0.07)',
-                color: frame.loop ? accent.text : '#94a3b8',
-              }}
-              title="Toggle loop"
-              aria-label="Toggle loop"
-            >
-              <Repeat className="w-3.5 h-3.5" />
-            </button>
+            {/* Compact ••• Overflow Popover (Loop, Share Card, Reel 9:16) */}
+            <div ref={menuRef} className="relative">
+              <button
+                type="button"
+                onClick={() => setMenuOpen((v) => !v)}
+                className="relative p-2 rounded-lg border active:scale-[0.98] transition-all"
+                style={{
+                  backgroundColor: menuOpen
+                    ? accent.softBg
+                    : 'rgba(255,255,255,0.03)',
+                  borderColor: menuOpen
+                    ? accent.border
+                    : 'rgba(255,255,255,0.07)',
+                  color: menuOpen ? accent.text : '#cbd5e1',
+                }}
+                title="More actions (Loop, Postcard, 9:16 Reel)"
+                aria-label="More playback and export actions"
+                aria-expanded={menuOpen}
+              >
+                {isExportingPostcard || isExportingReel ? (
+                  <Loader2
+                    className="w-3.5 h-3.5 animate-spin"
+                    style={{ color: accent.primary }}
+                  />
+                ) : (
+                  <MoreHorizontal className="w-3.5 h-3.5" />
+                )}
+                {hasOverflowIndicator && !menuOpen && (
+                  <span
+                    className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full"
+                    style={{ backgroundColor: accent.primary }}
+                  />
+                )}
+              </button>
 
-            <button
-              type="button"
-              onClick={onExportPostcard}
-              disabled={isExportingPostcard || isExportingReel}
-              className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg instrument-inset hover:bg-white/[0.08] text-slate-200 hover:text-white text-xs font-medium active:scale-[0.98] transition-all disabled:opacity-50"
-              title="Export 1080×1350 Route Postcard"
-              aria-label="Share route postcard"
-            >
-              {isExportingPostcard ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ color: accent.primary }} />
-              ) : (
-                <Camera className="w-3.5 h-3.5" style={{ color: accent.primary }} />
-              )}
-              <span className="hidden sm:inline">Card</span>
-            </button>
+              {menuOpen && (
+                <div className="absolute left-0 bottom-full mb-2 w-48 rounded-xl instrument-surface-strong p-1.5 space-y-1 z-30">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onToggleLoop();
+                      setMenuOpen(false);
+                    }}
+                    className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-xs font-medium hover:bg-white/[0.07] active:scale-[0.98] transition-all"
+                    style={{ color: frame.loop ? accent.text : '#e2e8f0' }}
+                  >
+                    <span className="flex items-center gap-2">
+                      <Repeat className="w-3.5 h-3.5" />
+                      <span>Loop replay</span>
+                    </span>
+                    <span className="text-[10px] font-mono opacity-80">
+                      {frame.loop ? 'ON' : 'OFF'}
+                    </span>
+                  </button>
 
-            <button
-              type="button"
-              onClick={onExportReel}
-              disabled={isExportingReel || isExportingPostcard}
-              className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg instrument-inset hover:bg-white/[0.08] text-slate-200 hover:text-white text-xs font-medium active:scale-[0.98] transition-all disabled:opacity-50"
-              title="Export 12s 9:16 Video Reel (720×1280)"
-              aria-label="Export 9:16 video reel"
-            >
-              {isExportingReel ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ color: accent.primary }} />
-              ) : (
-                <Film className="w-3.5 h-3.5" style={{ color: accent.primary }} />
+                  <div className="h-px bg-white/[0.07] my-0.5" />
+
+                  <button
+                    type="button"
+                    disabled={isExportingPostcard || isExportingReel}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onExportPostcard();
+                    }}
+                    className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-xs font-medium text-slate-100 hover:bg-white/[0.07] active:scale-[0.98] transition-all disabled:opacity-50"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Camera
+                        className="w-3.5 h-3.5"
+                        style={{ color: accent.primary }}
+                      />
+                      <span>Share Card</span>
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-400">
+                      4:5 PNG
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isExportingReel || isExportingPostcard}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onExportReel();
+                    }}
+                    className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-xs font-medium text-slate-100 hover:bg-white/[0.07] active:scale-[0.98] transition-all disabled:opacity-50"
+                  >
+                    <span className="flex items-center gap-2">
+                      <Film
+                        className="w-3.5 h-3.5"
+                        style={{ color: accent.primary }}
+                      />
+                      <span>Export Reel</span>
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-400">
+                      9:16 12s
+                    </span>
+                  </button>
+                </div>
               )}
-              <span className="hidden sm:inline">Reel 9:16</span>
-            </button>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">

@@ -68,7 +68,51 @@ const EMPTY_FC: GeoJSON.FeatureCollection = {
   features: [],
 };
 
-const STAGING_TIMEOUT_MS = 2200;
+const WORLD_ATMOSPHERE_FC: GeoJSON.FeatureCollection = {
+  type: 'FeatureCollection',
+  features: [
+    {
+      type: 'Feature',
+      properties: {},
+      geometry: {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [-180, -85],
+            [180, -85],
+            [180, 85],
+            [-180, 85],
+            [-180, -85],
+          ],
+        ],
+      },
+    },
+  ],
+};
+
+const STAGING_TIMEOUT_MS = 1500;
+
+function waitForMapEventOrTimeout(
+  map: maplibregl.Map,
+  eventName: 'idle' | 'style.load',
+  timeoutMs: number
+): Promise<void> {
+  if (eventName === 'style.load' && map.isStyleLoaded()) {
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timerId);
+      map.off(eventName, done);
+      resolve();
+    };
+    const timerId = window.setTimeout(done, timeoutMs);
+    map.once(eventName, done);
+  });
+}
 
 function getMapStyleSource(
   styleId: MapStyleId
@@ -136,6 +180,41 @@ function createPuckElement() {
   const root = document.createElement('div');
   root.className = 'relative w-20 h-20 pointer-events-none select-none';
 
+  // Night Headlamp Cone (forward-facing conic beam, crossfades in below 2° solar elevation)
+  const headlamp = document.createElement('div');
+  headlamp.style.position = 'absolute';
+  headlamp.style.left = '50%';
+  headlamp.style.top = '50%';
+  headlamp.style.width = '128px';
+  headlamp.style.height = '128px';
+  headlamp.style.transform = 'translate(-50%, -50%)';
+  headlamp.style.borderRadius = '9999px';
+  headlamp.style.pointerEvents = 'none';
+  headlamp.style.background =
+    'conic-gradient(from -32deg at 50% 50%, rgba(254, 249, 195, 0) 0deg, rgba(254, 240, 138, 0.36) 18deg, rgba(255, 255, 255, 0.68) 32deg, rgba(254, 240, 138, 0.36) 46deg, rgba(254, 249, 195, 0) 64deg, transparent 65deg)';
+  headlamp.style.maskImage =
+    'radial-gradient(circle at 50% 50%, rgba(0,0,0,0.95) 8%, rgba(0,0,0,0.55) 45%, rgba(0,0,0,0) 74%)';
+  headlamp.style.webkitMaskImage =
+    'radial-gradient(circle at 50% 50%, rgba(0,0,0,0.95) 8%, rgba(0,0,0,0.55) 45%, rgba(0,0,0,0) 74%)';
+  headlamp.style.opacity = '0';
+  headlamp.style.transition = 'opacity 260ms ease';
+
+  // Daytime Directional Sun Shadow (offset opposite solar azimuth)
+  const shadow = document.createElement('div');
+  shadow.style.position = 'absolute';
+  shadow.style.left = '50%';
+  shadow.style.top = '50%';
+  shadow.style.width = '18px';
+  shadow.style.height = '18px';
+  shadow.style.borderRadius = '9999px';
+  shadow.style.background =
+    'radial-gradient(circle, rgba(2, 6, 23, 0.78) 0%, rgba(2, 6, 23, 0) 72%)';
+  shadow.style.filter = 'blur(2.5px)';
+  shadow.style.transform = 'translate(-50%, -50%)';
+  shadow.style.opacity = '0';
+  shadow.style.pointerEvents = 'none';
+  shadow.style.transition = 'opacity 240ms ease';
+
   const sonar = document.createElement('div');
   sonar.className =
     'puck-sonar-ring absolute left-1/2 top-1/2 w-9 h-9 rounded-full';
@@ -184,11 +263,13 @@ function createPuckElement() {
   dot.style.backgroundColor = '#22d3ee';
   dot.style.boxShadow = '0 0 14px #22d3ee';
 
+  root.appendChild(headlamp);
+  root.appendChild(shadow);
   root.appendChild(sonar);
   root.appendChild(svg);
   root.appendChild(dot);
 
-  return { root, sonar, dot, stopStart, stopEnd };
+  return { root, headlamp, shadow, sonar, dot, stopStart, stopEnd };
 }
 
 export function MapCanvas({
@@ -266,6 +347,8 @@ export function MapCanvas({
   const isStagingRef = useRef(false);
   const stagingCleanupRef = useRef<(() => void) | null>(null);
   const stagingSeqRef = useRef(0);
+  const lastStagedTripIdRef = useRef<string | null>(null);
+  const styleSwitchSeqRef = useRef(0);
 
   const lastGradientProgressRef = useRef<number>(-1);
   const lastGradientTripIdRef = useRef<string | null>(null);
@@ -286,6 +369,8 @@ export function MapCanvas({
 
   const puckRef = useRef<{
     marker: maplibregl.Marker;
+    headlamp: HTMLDivElement;
+    shadow: HTMLDivElement;
     sonar: HTMLDivElement;
     dot: HTMLDivElement;
     stopStart: SVGStopElement;
@@ -433,19 +518,35 @@ export function MapCanvas({
         visitId: curVisitId,
       };
 
-      // 3c. Solar-Synced 3D Directional Lighting, Atmosphere & Night Route Glow Boost
+      // 3c. Full-Scene Solar-Synced Grading (Dark, Satellite, Daylight), Sky/Fog & Puck Shadow/Headlamp
       const curSettings = settingsRef.current;
       const nowPerf = performance.now();
       const prevSolar = lastSolarUpdateRef.current;
       if (curSettings.solarSync) {
         const solar = computeSolarPosition(frame.lat, frame.lng, frame.currentTimeMs);
+        const atmo = computeSolarAtmosphere(solar, curSettings.mapStyle);
+
+        // Update puck sun-tracked shadow & night headlamp every frame for smooth bearing rotation
+        if (puckRef.current) {
+          const rad = (-frame.bearing * Math.PI) / 180;
+          const localDx =
+            atmo.puck.shadowDxPx * Math.cos(rad) - atmo.puck.shadowDyPx * Math.sin(rad);
+          const localDy =
+            atmo.puck.shadowDxPx * Math.sin(rad) + atmo.puck.shadowDyPx * Math.cos(rad);
+          puckRef.current.shadow.style.transform = `translate(calc(-50% + ${localDx.toFixed(
+            1
+          )}px), calc(-50% + ${localDy.toFixed(1)}px))`;
+          puckRef.current.shadow.style.opacity = String(atmo.puck.shadowOpacity);
+          puckRef.current.headlamp.style.opacity = String(atmo.puck.headlampOpacity);
+        }
+
         const needsSolarUpdate =
           !prevSolar ||
           !prevSolar.enabled ||
           prevSolar.style !== curSettings.mapStyle ||
-          (nowPerf - prevSolar.tsMs >= 240 &&
-            (Math.abs(solar.elevationDeg - prevSolar.elev) >= 0.45 ||
-              Math.abs(solar.azimuthDeg - prevSolar.az) >= 1.2));
+          (nowPerf - prevSolar.tsMs >= 200 &&
+            (Math.abs(solar.elevationDeg - prevSolar.elev) >= 0.4 ||
+              Math.abs(solar.azimuthDeg - prevSolar.az) >= 1.1));
 
         if (needsSolarUpdate) {
           lastSolarUpdateRef.current = {
@@ -455,12 +556,56 @@ export function MapCanvas({
             enabled: true,
             style: curSettings.mapStyle,
           };
-          const atmo = computeSolarAtmosphere(solar, curSettings.mapStyle);
           try {
             map.setLight(atmo.light);
             if (typeof map.setSky === 'function') {
               map.setSky(atmo.sky);
             }
+            const mapWithFog = map as unknown as {
+              setFog?: (fog: unknown) => void;
+            };
+            if (typeof mapWithFog.setFog === 'function') {
+              mapWithFog.setFog(atmo.fog);
+            }
+
+            // Full-coverage atmospheric tint layer beneath routes & 3D buildings
+            if (map.getLayer('chronomap-solar-atmosphere')) {
+              map.setPaintProperty(
+                'chronomap-solar-atmosphere',
+                'fill-color',
+                atmo.tint.color
+              );
+              map.setPaintProperty(
+                'chronomap-solar-atmosphere',
+                'fill-opacity',
+                atmo.tint.opacity
+              );
+            }
+
+            // Satellite Hybrid raster exposure grading
+            if (map.getLayer('esri-world-imagery-layer')) {
+              map.setPaintProperty(
+                'esri-world-imagery-layer',
+                'raster-brightness-max',
+                atmo.raster.brightnessMax
+              );
+              map.setPaintProperty(
+                'esri-world-imagery-layer',
+                'raster-brightness-min',
+                atmo.raster.brightnessMin
+              );
+              map.setPaintProperty(
+                'esri-world-imagery-layer',
+                'raster-contrast',
+                atmo.raster.contrast
+              );
+              map.setPaintProperty(
+                'esri-world-imagery-layer',
+                'raster-saturation',
+                atmo.raster.saturation
+              );
+            }
+
             if (map.getLayer('chronomap-3d-buildings')) {
               map.setPaintProperty(
                 'chronomap-3d-buildings',
@@ -477,55 +622,70 @@ export function MapCanvas({
               map.setPaintProperty(
                 'active-route-glow',
                 'line-opacity',
-                Math.min(0.84, Number((0.5 * atmo.routeGlowOpacityBoost).toFixed(2)))
+                Math.min(0.88, Number((0.5 * atmo.routeGlowOpacityBoost).toFixed(2)))
               );
             }
           } catch {
             // Ignore transient style-not-ready errors
           }
         }
-      } else if (prevSolar?.enabled) {
-        lastSolarUpdateRef.current = {
-          tsMs: nowPerf,
-          elev: 0,
-          az: 0,
-          enabled: false,
-          style: curSettings.mapStyle,
-        };
-        const defaultBuildingColor =
-          curSettings.mapStyle === 'DAYLIGHT'
-            ? '#cbd5e1'
-            : curSettings.mapStyle === 'SATELLITE'
-              ? '#1e293b'
-              : '#162235';
-        try {
-          map.setLight({
-            anchor: 'viewport',
-            color: '#ffffff',
-            intensity: 0.5,
-            position: [1.15, 210, 30],
-          });
-          if (map.getLayer('chronomap-3d-buildings')) {
-            map.setPaintProperty(
-              'chronomap-3d-buildings',
-              'fill-extrusion-color',
-              defaultBuildingColor
-            );
-            map.setPaintProperty(
-              'chronomap-3d-buildings',
-              'fill-extrusion-opacity',
-              curSettings.mapStyle === 'SATELLITE' ? 0.56 : 0.72
-            );
+      } else {
+        if (puckRef.current) {
+          puckRef.current.shadow.style.opacity = '0';
+          puckRef.current.headlamp.style.opacity = '0';
+        }
+        if (prevSolar?.enabled) {
+          lastSolarUpdateRef.current = {
+            tsMs: nowPerf,
+            elev: 0,
+            az: 0,
+            enabled: false,
+            style: curSettings.mapStyle,
+          };
+          const defaultBuildingColor =
+            curSettings.mapStyle === 'DAYLIGHT'
+              ? '#cbd5e1'
+              : curSettings.mapStyle === 'SATELLITE'
+                ? '#1e293b'
+                : '#162235';
+          try {
+            map.setLight({
+              anchor: 'viewport',
+              color: '#ffffff',
+              intensity: 0.5,
+              position: [1.15, 210, 30],
+            });
+            if (map.getLayer('chronomap-solar-atmosphere')) {
+              map.setPaintProperty('chronomap-solar-atmosphere', 'fill-opacity', 0);
+            }
+            if (map.getLayer('esri-world-imagery-layer')) {
+              map.setPaintProperty('esri-world-imagery-layer', 'raster-brightness-max', 1);
+              map.setPaintProperty('esri-world-imagery-layer', 'raster-brightness-min', 0);
+              map.setPaintProperty('esri-world-imagery-layer', 'raster-contrast', 0);
+              map.setPaintProperty('esri-world-imagery-layer', 'raster-saturation', 0);
+            }
+            if (map.getLayer('chronomap-3d-buildings')) {
+              map.setPaintProperty(
+                'chronomap-3d-buildings',
+                'fill-extrusion-color',
+                defaultBuildingColor
+              );
+              map.setPaintProperty(
+                'chronomap-3d-buildings',
+                'fill-extrusion-opacity',
+                curSettings.mapStyle === 'SATELLITE' ? 0.56 : 0.72
+              );
+            }
+            if (map.getLayer('active-route-glow')) {
+              map.setPaintProperty(
+                'active-route-glow',
+                'line-opacity',
+                curSettings.routeGlow ? 0.5 : 0
+              );
+            }
+          } catch {
+            // Ignore transient style errors
           }
-          if (map.getLayer('active-route-glow')) {
-            map.setPaintProperty(
-              'active-route-glow',
-              'line-opacity',
-              curSettings.routeGlow ? 0.5 : 0
-            );
-          }
-        } catch {
-          // Ignore transient style errors
         }
       }
 
@@ -632,7 +792,27 @@ export function MapCanvas({
       const prebaked = controller.getPrebakedRoute();
       const snap = controller.getSnapshot();
 
-      // 1. OpenFreeMap Planet vector source for crisp 3D extruded buildings (no DEM terrain draping)
+      // 0. Full-coverage Solar Atmospheric Tint Layer (beneath 3D buildings & routes)
+      if (!map.getSource('solar-atmosphere-source')) {
+        map.addSource('solar-atmosphere-source', {
+          type: 'geojson',
+          data: WORLD_ATMOSPHERE_FC,
+        });
+      }
+
+      if (!map.getLayer('chronomap-solar-atmosphere')) {
+        map.addLayer({
+          id: 'chronomap-solar-atmosphere',
+          type: 'fill',
+          source: 'solar-atmosphere-source',
+          paint: {
+            'fill-color': '#040814',
+            'fill-opacity': 0,
+          },
+        });
+      }
+
+      // 1. OpenFreeMap Planet vector source for zoom-faded 3D extruded buildings
       if (!map.getSource('openfreemap-3d')) {
         map.addSource('openfreemap-3d', {
           type: 'vector',
@@ -652,23 +832,29 @@ export function MapCanvas({
           type: 'fill-extrusion',
           source: 'openfreemap-3d',
           'source-layer': 'building',
-          minzoom: 13,
+          minzoom: 13.5,
           layout: {
             visibility: curSettings.enable3D ? 'visible' : 'none',
           },
           paint: {
             'fill-extrusion-color': buildingColor,
             'fill-extrusion-height': [
-              'coalesce',
-              ['get', 'render_height'],
-              ['get', 'height'],
-              12,
+              'interpolate',
+              ['linear'],
+              ['zoom'],
+              13.5,
+              0,
+              14.5,
+              ['coalesce', ['get', 'render_height'], ['get', 'height'], 12],
             ],
             'fill-extrusion-base': [
-              'coalesce',
-              ['get', 'render_min_height'],
-              ['get', 'min_height'],
+              'interpolate',
+              ['linear'],
+              ['zoom'],
+              13.5,
               0,
+              14.5,
+              ['coalesce', ['get', 'render_min_height'], ['get', 'min_height'], 0],
             ],
             'fill-extrusion-opacity':
               curSettings.mapStyle === 'SATELLITE' ? 0.56 : 0.72,
@@ -833,6 +1019,8 @@ export function MapCanvas({
 
         puckRef.current = {
           marker: puckMarker,
+          headlamp: puckEl.headlamp,
+          shadow: puckEl.shadow,
           sonar: puckEl.sonar,
           dot: puckEl.dot,
           stopStart: puckEl.stopStart,
@@ -906,11 +1094,8 @@ export function MapCanvas({
   );
 
   /**
-   * Corridor Pre-Staging Pipeline:
-   * 1) Upload pre-baked static GeoJSON once (0% -> 40%)
-   * 2) Frame trip bounding box with duration: 0, maxZoom: 15 to warm GPU tile cache,
-   *    waiting for map.once('idle') with a hard 2.2s timeout cap (40% -> 95%)
-   * 3) Snap cleanly to starting viewpoint & dismiss overlay (100%)
+   * Corridor Pre-Staging Pipeline (only runs when loading a new trip/day):
+   * Uses Promise.race + hard 1500ms cap + try/finally cleanup so it can NEVER hang.
    */
   const runCorridorPreStaging = useCallback(
     (
@@ -919,12 +1104,12 @@ export function MapCanvas({
       shouldAutoPlay: boolean,
       stageLabel = 'Staging 3D Corridor...'
     ) => {
-      // Abort any previous staging pass
       stagingCleanupRef.current?.();
       stagingCleanupRef.current = null;
 
       const seq = ++stagingSeqRef.current;
       isStagingRef.current = true;
+      lastStagedTripIdRef.current = targetTrip.id;
 
       const wasPlaying = controller.getSnapshot()?.isPlaying ?? false;
       if (wasPlaying) {
@@ -932,118 +1117,129 @@ export function MapCanvas({
       }
       const resumePlayback = shouldAutoPlay || wasPlaying;
 
-      onStagingChangeRef.current?.({
-        active: true,
-        percent: 15,
-        label: stageLabel,
-      });
-
-      // Stage 1: Upload pre-baked spline GeoJSON once (0% -> 40%)
-      const prebaked = controller.getPrebakedRoute();
-      const routeGeoJson = prebaked?.geojson ?? EMPTY_FC;
-
-      const ghostSource = map.getSource('ghost-route') as
-        | maplibregl.GeoJSONSource
-        | undefined;
-      if (ghostSource) {
-        ghostSource.setData(routeGeoJson);
-      }
-
-      const activeSource = map.getSource('active-route') as
-        | maplibregl.GeoJSONSource
-        | undefined;
-      if (activeSource) {
-        activeSource.setData(routeGeoJson);
-      }
-
-      const snap = controller.getSnapshot();
-      if (snap) {
-        updateGpuRouteProgress(map, snap.tripId, snap.lineProgress, true);
-      }
-
-      onStagingChangeRef.current?.({
-        active: true,
-        percent: 40,
-        label: 'Pre-loading corridor tiles...',
-      });
-
-      // Stage 2: Frame full corridor instantaneously so MapLibre downloads & caches tiles
-      map.fitBounds(targetTrip.bounds, {
-        duration: 0,
-        maxZoom: 15,
-        padding: {
-          top: 84,
-          bottom: 132,
-          left: sidebarOpenRef.current ? 350 : 48,
-          right: 240,
-        },
-        pitch: settingsRef.current.enable3D ? 42 : 0,
-        bearing: 0,
-      });
-
-      let currentPercent = 44;
-      let finished = false;
+      let cancelled = false;
+      let progressTimerId: number | null = null;
       let dismissTimerId: number | null = null;
 
-      const progressTimerId = window.setInterval(() => {
-        if (finished || seq !== stagingSeqRef.current) return;
-        currentPercent = Math.min(93, currentPercent + 6);
-        onStagingChangeRef.current?.({
-          active: true,
-          percent: currentPercent,
-          label: 'Pre-loading corridor tiles...',
-        });
-      }, 140);
-
-      const finishStaging = () => {
-        if (finished || seq !== stagingSeqRef.current) return;
-        finished = true;
-
-        window.clearInterval(progressTimerId);
-        window.clearTimeout(timeoutId);
-        map.off('idle', finishStaging);
-
-        onStagingChangeRef.current?.({
-          active: true,
-          percent: 100,
-          label: 'Corridor ready',
-        });
-
-        isStagingRef.current = false;
-        snapToActiveViewpoint(map, targetTrip, false);
-
-        const latestSnap = controller.getSnapshot();
-        if (latestSnap) {
-          applyFrameToMap(latestSnap);
-        }
-
-        dismissTimerId = window.setTimeout(() => {
-          if (seq !== stagingSeqRef.current) return;
-          onStagingChangeRef.current?.({
-            active: false,
-            percent: 100,
-            label: '',
-          });
-          triggerSuccessPulse();
-          if (resumePlayback) {
-            controller.play();
-          }
-        }, 140);
-      };
-
-      const timeoutId = window.setTimeout(finishStaging, STAGING_TIMEOUT_MS);
-      map.once('idle', finishStaging);
-
       stagingCleanupRef.current = () => {
-        finished = true;
+        cancelled = true;
         isStagingRef.current = false;
-        window.clearInterval(progressTimerId);
-        window.clearTimeout(timeoutId);
+        if (progressTimerId !== null) {
+          window.clearInterval(progressTimerId);
+          progressTimerId = null;
+        }
         if (dismissTimerId !== null) {
           window.clearTimeout(dismissTimerId);
+          dismissTimerId = null;
         }
-        map.off('idle', finishStaging);
       };
+
+      const execute = async () => {
+        try {
+          onStagingChangeRef.current?.({
+            active: true,
+            percent: 15,
+            label: stageLabel,
+          });
+
+          // Stage 1: Upload pre-baked spline GeoJSON once (0% -> 40%)
+          const prebaked = controller.getPrebakedRoute();
+          const routeGeoJson = prebaked?.geojson ?? EMPTY_FC;
+
+          const ghostSource = map.getSource('ghost-route') as
+            | maplibregl.GeoJSONSource
+            | undefined;
+          ghostSource?.setData(routeGeoJson);
+
+          const activeSource = map.getSource('active-route') as
+            | maplibregl.GeoJSONSource
+            | undefined;
+          activeSource?.setData(routeGeoJson);
+
+          const snap = controller.getSnapshot();
+          if (snap) {
+            updateGpuRouteProgress(map, snap.tripId, snap.lineProgress, true);
+          }
+
+          onStagingChangeRef.current?.({
+            active: true,
+            percent: 40,
+            label: 'Pre-loading corridor tiles...',
+          });
+
+          // Stage 2: Frame corridor instantaneously to warm GPU tile cache (1500ms hard cap)
+          map.fitBounds(targetTrip.bounds, {
+            duration: 0,
+            maxZoom: 15,
+            padding: {
+              top: 84,
+              bottom: 132,
+              left: sidebarOpenRef.current ? 350 : 48,
+              right: 240,
+            },
+            pitch: settingsRef.current.enable3D ? 42 : 0,
+            bearing: 0,
+          });
+
+          let currentPercent = 44;
+          progressTimerId = window.setInterval(() => {
+            if (cancelled || seq !== stagingSeqRef.current) return;
+            currentPercent = Math.min(93, currentPercent + 8);
+            onStagingChangeRef.current?.({
+              active: true,
+              percent: currentPercent,
+              label: 'Pre-loading corridor tiles...',
+            });
+          }, 130);
+
+          await waitForMapEventOrTimeout(map, 'idle', STAGING_TIMEOUT_MS);
+
+          if (cancelled || seq !== stagingSeqRef.current) return;
+
+          onStagingChangeRef.current?.({
+            active: true,
+            percent: 100,
+            label: 'Corridor ready',
+          });
+
+          isStagingRef.current = false;
+          snapToActiveViewpoint(map, targetTrip, false);
+
+          const latestSnap = controller.getSnapshot();
+          if (latestSnap) {
+            applyFrameToMap(latestSnap);
+          }
+        } finally {
+          if (progressTimerId !== null) {
+            window.clearInterval(progressTimerId);
+            progressTimerId = null;
+          }
+          isStagingRef.current = false;
+
+          if (!cancelled && seq === stagingSeqRef.current) {
+            dismissTimerId = window.setTimeout(() => {
+              if (cancelled || seq !== stagingSeqRef.current) return;
+              onStagingChangeRef.current?.({
+                active: false,
+                percent: 100,
+                label: '',
+              });
+              triggerSuccessPulse();
+              if (resumePlayback) {
+                controller.play();
+              }
+            }, 110);
+          } else if (seq === stagingSeqRef.current) {
+            onStagingChangeRef.current?.({
+              active: false,
+              percent: 0,
+              label: '',
+            });
+          }
+        }
+      };
+
+      void execute();
     },
     [controller, applyFrameToMap, snapToActiveViewpoint, updateGpuRouteProgress]
   );
@@ -1122,23 +1318,51 @@ export function MapCanvas({
     };
   }, [syncCustomSourcesAndLayers]);
 
-  // Switch Map Style seamlessly (style.load triggers corridor pre-staging)
+  // Switch Map Style non-blockingly with bulletproof Promise.race + isStyleLoaded failsafe
   useEffect(() => {
     const map = mapRef.current;
     if (!map || appliedStyleIdRef.current === settings.mapStyle) return;
     appliedStyleIdRef.current = settings.mapStyle;
     styleLoadedRef.current = false;
-    if (tripRef.current) {
-      onStagingChangeRef.current?.({
-        active: true,
-        percent: 10,
-        label: 'Switching map style...',
-      });
-    }
-    map.setStyle(getMapStyleSource(settings.mapStyle));
-  }, [settings.mapStyle]);
+    const switchSeq = ++styleSwitchSeqRef.current;
 
-  // Toggle crisp 3D Buildings (without DEM terrain) + pre-stage corridor
+    // Never block screen with Corridor Pre-Staging modal on style swaps
+    stagingCleanupRef.current?.();
+    stagingCleanupRef.current = null;
+    onStagingChangeRef.current?.({ active: false, percent: 0, label: '' });
+
+    let cancelled = false;
+    const applyStyleSwap = async () => {
+      try {
+        map.setStyle(getMapStyleSource(settings.mapStyle));
+        if (map.isStyleLoaded()) {
+          if (!cancelled && switchSeq === styleSwitchSeqRef.current) {
+            syncCustomSourcesAndLayers(map);
+          }
+          return;
+        }
+        await Promise.race([
+          waitForMapEventOrTimeout(map, 'style.load', STAGING_TIMEOUT_MS),
+          waitForMapEventOrTimeout(map, 'idle', STAGING_TIMEOUT_MS),
+        ]);
+      } finally {
+        if (!cancelled && switchSeq === styleSwitchSeqRef.current && !styleLoadedRef.current) {
+          try {
+            syncCustomSourcesAndLayers(map);
+          } catch {
+            // MapLibre may still be finalizing style JSON; style.load listener will catch it
+          }
+        }
+      }
+    };
+
+    void applyStyleSwap();
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.mapStyle, syncCustomSourcesAndLayers]);
+
+  // Toggle Zoom-Faded 3D Buildings smoothly without blocking pre-staging modal
   const prevEnable3DRef = useRef<boolean>(settings.enable3D);
   useEffect(() => {
     const map = mapRef.current;
@@ -1154,22 +1378,15 @@ export function MapCanvas({
 
     if (prevEnable3DRef.current !== settings.enable3D) {
       prevEnable3DRef.current = settings.enable3D;
-      const curTrip = tripRef.current;
-      if (curTrip) {
-        runCorridorPreStaging(
-          map,
-          curTrip,
-          false,
-          settings.enable3D ? 'Staging 3D Buildings...' : 'Updating 2D Corridor...'
-        );
-      } else {
-        map.easeTo({
-          pitch: settings.enable3D ? 52 : 0,
-          duration: 500,
-        });
-      }
+      const targetPitch = getCameraPitchForMode(cameraModeRef.current, settings.enable3D);
+      chaseCameraRef.current.pitch = targetPitch;
+      chaseCameraRef.current.transitionUntilMs = performance.now() + 520;
+      map.easeTo({
+        pitch: targetPitch,
+        duration: 480,
+      });
     }
-  }, [settings.enable3D, styleRevision, runCorridorPreStaging]);
+  }, [settings.enable3D, styleRevision]);
 
   // Update Route Thickness, Glow Intensity, and Accent Theme live on GPU
   useEffect(() => {
@@ -1265,6 +1482,7 @@ export function MapCanvas({
     activeVisitIdRef.current = null;
 
     if (!trip) {
+      lastStagedTripIdRef.current = null;
       stagingCleanupRef.current?.();
       stagingCleanupRef.current = null;
       onStagingChangeRef.current?.({ active: false, percent: 0, label: '' });
@@ -1342,15 +1560,38 @@ export function MapCanvas({
 
     visitHandlesRef.current = newHandles;
 
-    runCorridorPreStaging(
-      map,
-      trip,
-      autoPlayRef.current,
-      settingsRef.current.enable3D
-        ? 'Staging 3D Corridor...'
-        : 'Staging Route Corridor...'
-    );
-  }, [trip, styleRevision, controller, runCorridorPreStaging]);
+    // Only run blocking Corridor Pre-Staging when loading a genuinely NEW trip/day;
+    // style switches on the active trip re-attach sources & solar lighting instantaneously.
+    if (lastStagedTripIdRef.current !== trip.id) {
+      runCorridorPreStaging(
+        map,
+        trip,
+        autoPlayRef.current,
+        settingsRef.current.enable3D
+          ? 'Staging 3D Corridor...'
+          : 'Staging Route Corridor...'
+      );
+    } else {
+      const prebaked = controller.getPrebakedRoute();
+      const routeGeoJson = prebaked?.geojson ?? EMPTY_FC;
+      const ghostSource = map.getSource('ghost-route') as
+        | maplibregl.GeoJSONSource
+        | undefined;
+      ghostSource?.setData(routeGeoJson);
+
+      const activeSource = map.getSource('active-route') as
+        | maplibregl.GeoJSONSource
+        | undefined;
+      activeSource?.setData(routeGeoJson);
+
+      lastSolarUpdateRef.current = null;
+      const latestSnap = controller.getSnapshot();
+      if (latestSnap) {
+        updateGpuRouteProgress(map, latestSnap.tripId, latestSnap.lineProgress, true);
+        applyFrameToMap(latestSnap);
+      }
+    }
+  }, [trip, styleRevision, controller, runCorridorPreStaging, updateGpuRouteProgress, applyFrameToMap]);
 
   // Live-update visit marker labels whenever geocoder resolves or user edits a nickname
   useEffect(() => {

@@ -406,6 +406,91 @@ function filterGpsSpikes(
   return { cleaned, filteredSpikes };
 }
 
+/**
+ * Computes perpendicular distance in meters from point `p` to segment `[a, b]`
+ * using fast local equirectangular projection (accurate within centimeters over
+ * street/city spans and ~10x faster than spherical cross-track math).
+ */
+function perpendicularDistanceMeters(
+  p: { lat: number; lng: number },
+  a: { lat: number; lng: number },
+  b: { lat: number; lng: number }
+): number {
+  const meanLatRad = (((a.lat + b.lat) * 0.5) * Math.PI) / 180;
+  const mPerDegLat = 111_320;
+  const mPerDegLng = 111_320 * Math.max(0.05, Math.cos(meanLatRad));
+
+  const ax = 0;
+  const ay = 0;
+  const bx = (b.lng - a.lng) * mPerDegLng;
+  const by = (b.lat - a.lat) * mPerDegLat;
+  const px = (p.lng - a.lng) * mPerDegLng;
+  const py = (p.lat - a.lat) * mPerDegLat;
+
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-6) {
+    return Math.hypot(px, py);
+  }
+  const t = Math.max(0, Math.min(1, (px * dx + py * dy) / lenSq));
+  const projX = ax + t * dx;
+  const projY = ay + t * dy;
+  return Math.hypot(px - projX, py - projY);
+}
+
+/**
+ * Iterative (stack-safe) Ramer-Douglas-Peucker polyline simplification.
+ * Prunes redundant GPS jitter points within `epsilonMeters` (~3m) while
+ * always preserving start/end anchors and significant geometric curves.
+ */
+export function simplifyPolylineRdp<T extends { lat: number; lng: number }>(
+  points: T[],
+  epsilonMeters = 3
+): T[] {
+  const n = points.length;
+  if (n <= 2 || epsilonMeters <= 0) {
+    return points;
+  }
+
+  const keep = new Uint8Array(n);
+  keep[0] = 1;
+  keep[n - 1] = 1;
+
+  const stack: Array<[number, number]> = [[0, n - 1]];
+
+  while (stack.length > 0) {
+    const [first, last] = stack.pop()!;
+    let maxDist = -1;
+    let splitIdx = -1;
+
+    const a = points[first];
+    const b = points[last];
+
+    for (let i = first + 1; i < last; i++) {
+      const dist = perpendicularDistanceMeters(points[i], a, b);
+      if (dist > maxDist) {
+        maxDist = dist;
+        splitIdx = i;
+      }
+    }
+
+    if (maxDist > epsilonMeters && splitIdx !== -1) {
+      keep[splitIdx] = 1;
+      if (splitIdx - first > 1) stack.push([first, splitIdx]);
+      if (last - splitIdx > 1) stack.push([splitIdx, last]);
+    }
+  }
+
+  const simplified: T[] = [];
+  for (let i = 0; i < n; i++) {
+    if (keep[i]) {
+      simplified.push(points[i]);
+    }
+  }
+  return simplified;
+}
+
 function synthesizePointsBetween(
   start: { lat: number; lng: number },
   end: { lat: number; lng: number },
@@ -765,7 +850,11 @@ function parseOnDeviceTimeline(
     if (pts.length > 0) {
       const spikeRes = filterGpsSpikes(pts, act.mode);
       filteredSpikes += spikeRes.filteredSpikes;
-      if (spikeRes.cleaned.length > 0) {
+      const simplified =
+        spikeRes.cleaned.length > 3
+          ? simplifyPolylineRdp(spikeRes.cleaned, 3)
+          : spikeRes.cleaned;
+      if (simplified.length > 0) {
         drafts.push({
           kind: 'ACTIVITY',
           mode: act.mode,
@@ -773,7 +862,7 @@ function parseOnDeviceTimeline(
           startTimeMs: act.startTimeMs,
           endTimeMs: act.endTimeMs,
           localDateKey: act.localDateKey,
-          points: spikeRes.cleaned,
+          points: simplified,
           explicitDistanceM: act.distanceMeters,
         });
       }

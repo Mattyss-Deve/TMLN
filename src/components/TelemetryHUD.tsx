@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Check, Edit3, MapPin, Moon, Sun, Sunrise, Sunset, X } from 'lucide-react';
+import { Check, Edit3, MapPin, X } from 'lucide-react';
 import type {
   AccentThemeId,
-  SolarPhase,
+  SolarPosition,
   TelemetryFrame,
   UnitSystem,
 } from '../types/timeline';
@@ -14,7 +14,7 @@ import {
   getSpeedUnitLabel,
 } from '../utils/format';
 import { getCoordKey, resolveVisitDisplayName } from '../utils/geocoder';
-import { MODE_COLORS, MODE_LABELS } from '../utils/geo';
+import { clamp, MODE_COLORS, MODE_LABELS } from '../utils/geo';
 import { computeSolarPosition, getSolarPhaseAccent } from '../utils/solar';
 import { ModeIcon } from './ModeIcon';
 
@@ -28,20 +28,82 @@ interface TelemetryHUDProps {
   onSaveNickname: (lat: number, lng: number, nickname: string) => void;
 }
 
-function SolarPhaseIcon({ phase }: { phase: SolarPhase }) {
-  switch (phase) {
-    case 'Night':
-    case 'Blue Hour':
-      return <Moon className="w-3 h-3 shrink-0" />;
-    case 'Dawn':
-      return <Sunrise className="w-3 h-3 shrink-0" />;
-    case 'Dusk':
-    case 'Golden Hour':
-      return <Sunset className="w-3 h-3 shrink-0" />;
-    case 'Daylight':
-    default:
-      return <Sun className="w-3 h-3 shrink-0" />;
+/**
+ * Compact precision sun/moon horizon arc visual indicator.
+ * Shows current solar elevation relative to the horizon line and morning/evening side.
+ */
+function SolarHorizonArc({ solar }: { solar: SolarPosition }) {
+  const color = getSolarPhaseAccent(solar.phase);
+  // Map azimuth progress across arc: morning (East < 180°) sits left -> apex, afternoon right
+  const isMorning = solar.azimuthDeg < 180;
+  const elevNorm = clamp(solar.elevationDeg / 65, -1, 1); // -1 (deep night) .. +1 (high noon)
+
+  // Horizon line at y=13 in a 30x18 viewBox; arc spans x=3..27
+  const cx = 15;
+  const horizonY = 13;
+  const rx = 11;
+  const ry = 9.5;
+
+  // Compute orb position along upper sun arc (day) or subtle lower moon dip (night)
+  let orbX: number;
+  let orbY: number;
+  if (elevNorm >= 0) {
+    // Angle from left horizon (PI) through zenith (PI/2) to right horizon (0)
+    const apexBias = clamp(elevNorm, 0, 1);
+    const angle = isMorning
+      ? Math.PI - apexBias * (Math.PI / 2)
+      : apexBias * (Math.PI / 2);
+    orbX = cx + rx * Math.cos(angle);
+    orbY = horizonY - ry * Math.sin(angle);
+  } else {
+    const nightDepth = clamp(-elevNorm, 0, 1);
+    orbX = isMorning ? cx - rx * (1 - nightDepth * 0.6) : cx + rx * (1 - nightDepth * 0.6);
+    orbY = horizonY + 1 + nightDepth * 2.8;
   }
+
+  return (
+    <div
+      className="inline-flex items-center gap-1.5 shrink-0"
+      title={`${solar.phase} · Solar elevation ${solar.elevationDeg.toFixed(1)}° · Azimuth ${Math.round(
+        solar.azimuthDeg
+      )}°`}
+    >
+      <svg
+        width="30"
+        height="18"
+        viewBox="0 0 30 18"
+        className="shrink-0 overflow-visible"
+        aria-label={`Solar phase: ${solar.phase}`}
+      >
+        {/* Dashed upper sky path */}
+        <path
+          d="M 4 13 A 11 9.5 0 0 1 26 13"
+          fill="none"
+          stroke="rgba(148, 163, 184, 0.25)"
+          strokeWidth="1.1"
+          strokeDasharray="2 1.8"
+        />
+        {/* Horizon reference line */}
+        <line
+          x1="2"
+          y1="13"
+          x2="28"
+          y2="13"
+          stroke="rgba(255, 255, 255, 0.16)"
+          strokeWidth="1"
+        />
+        {/* Sun / Moon orb */}
+        <circle cx={orbX} cy={orbY} r="3.6" fill={color} opacity="0.22" />
+        <circle cx={orbX} cy={orbY} r="2.1" fill={color} />
+      </svg>
+      <span
+        className="hidden md:inline text-[10px] font-medium whitespace-nowrap"
+        style={{ color }}
+      >
+        {solar.phase}
+      </span>
+    </div>
+  );
 }
 
 export function TelemetryHUD({
@@ -76,14 +138,14 @@ export function TelemetryHUD({
   const solar = solarSync
     ? computeSolarPosition(frame.lat, frame.lng, frame.currentTimeMs)
     : null;
-  const solarColor = solar ? getSolarPhaseAccent(solar.phase) : '#fde047';
 
   return (
     <div className="flex flex-col items-end gap-1.5 pointer-events-none select-none max-w-full">
       {/* Low-profile Horizontal Telemetry Instrument Bar */}
       <div className="pointer-events-auto instrument-surface rounded-xl px-2.5 sm:px-3 py-1.5 flex items-center gap-2 sm:gap-2.5">
-        {/* Live Clock */}
-        <div className="flex items-baseline gap-1.5 shrink-0">
+        {/* Solar Horizon Arc + Live Clock */}
+        <div className="flex items-center gap-2 shrink-0">
+          {solar && <SolarHorizonArc solar={solar} />}
           <span className="text-xs sm:text-sm font-mono font-semibold text-white tabular-nums tracking-tight">
             {formatClock(frame.currentTimeMs)}
           </span>
@@ -124,24 +186,6 @@ export function TelemetryHUD({
           <ModeIcon mode={frame.mode} className="w-3 h-3" />
           <span className="hidden sm:inline">{MODE_LABELS[frame.mode]}</span>
         </div>
-
-        {/* Subtle Solar Phase Pill */}
-        {solar && (
-          <div
-            className="hidden md:inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border text-[11px] font-medium shrink-0"
-            style={{
-              color: solarColor,
-              borderColor: `${solarColor}30`,
-              backgroundColor: `${solarColor}12`,
-            }}
-            title={`Solar elevation ${solar.elevationDeg.toFixed(1)}° · Azimuth ${Math.round(
-              solar.azimuthDeg
-            )}°`}
-          >
-            <SolarPhaseIcon phase={solar.phase} />
-            <span>{solar.phase}</span>
-          </div>
-        )}
       </div>
 
       {/* Compact Visit Chip (Only while dwelling at a place visit) */}

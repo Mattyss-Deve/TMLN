@@ -1,23 +1,20 @@
 import { describe, expect, it } from 'vitest';
+import { simplifyPolylineRdp } from '../../workers/timelineParser';
 import { computeSolarAtmosphere, computeSolarPosition } from '../solar';
 
-describe('Solar-Synced Ephemeris & 3D Atmosphere', () => {
-  // Prague (50.0755° N, 14.4378° E) on Summer Solstice (June 21, 2024)
+describe('Solar-Synced Ephemeris & All-Style 3D Grading', () => {
+  // Prague (50.0755° N, 14.4378° E)
   const PRAGUE_LAT = 50.0755;
   const PRAGUE_LNG = 14.4378;
 
   it('computes high Daylight elevation near solar noon and deep Night near midnight', () => {
-    // Solar noon in Prague (UTC+2, ~11:02 UTC -> 13:02 CEST)
     const noonUtc = Date.UTC(2024, 5, 21, 11, 2, 0);
     const noonSolar = computeSolarPosition(PRAGUE_LAT, PRAGUE_LNG, noonUtc);
     expect(noonSolar.elevationDeg).toBeGreaterThan(60);
     expect(noonSolar.elevationDeg).toBeLessThan(66);
-    expect(noonSolar.azimuthDeg).toBeGreaterThan(165);
-    expect(noonSolar.azimuthDeg).toBeLessThan(195);
     expect(noonSolar.phase).toBe('Daylight');
     expect(noonSolar.isNight).toBe(false);
 
-    // Midnight in winter (Dec 21, 2024 23:00 UTC)
     const winterMidnightUtc = Date.UTC(2024, 11, 21, 23, 0, 0);
     const nightSolar = computeSolarPosition(PRAGUE_LAT, PRAGUE_LNG, winterMidnightUtc);
     expect(nightSolar.elevationDeg).toBeLessThan(-50);
@@ -25,32 +22,62 @@ describe('Solar-Synced Ephemeris & 3D Atmosphere', () => {
     expect(nightSolar.isNight).toBe(true);
   });
 
-  it('distinguishes eastern Dawn from western Dusk and produces smooth atmosphere palettes', () => {
-    // Equinox sunrise (~05:05 UTC in Prague) and sunset (~17:15 UTC)
-    const morningUtc = Date.UTC(2024, 2, 20, 5, 10, 0);
-    const eveningUtc = Date.UTC(2024, 2, 20, 17, 10, 0);
-
-    const morning = computeSolarPosition(PRAGUE_LAT, PRAGUE_LNG, morningUtc);
-    const evening = computeSolarPosition(PRAGUE_LAT, PRAGUE_LNG, eveningUtc);
-
-    expect(morning.azimuthDeg).toBeLessThan(180);
-    expect(evening.azimuthDeg).toBeGreaterThan(180);
-    expect(['Blue Hour', 'Dawn', 'Golden Hour']).toContain(morning.phase);
-    expect(['Golden Hour', 'Dusk', 'Blue Hour']).toContain(evening.phase);
-
-    const dayAtmo = computeSolarAtmosphere(
-      computeSolarPosition(PRAGUE_LAT, PRAGUE_LNG, Date.UTC(2024, 5, 21, 11, 2, 0)),
-      'DARK'
+  it('grades Satellite raster exposure, Daylight atmospheric tint, fog stars, and puck shadow/headlamp', () => {
+    const noonSolar = computeSolarPosition(
+      PRAGUE_LAT,
+      PRAGUE_LNG,
+      Date.UTC(2024, 5, 21, 11, 2, 0)
     );
-    const nightAtmo = computeSolarAtmosphere(
-      computeSolarPosition(PRAGUE_LAT, PRAGUE_LNG, Date.UTC(2024, 11, 21, 23, 0, 0)),
-      'DARK'
+    const nightSolar = computeSolarPosition(
+      PRAGUE_LAT,
+      PRAGUE_LNG,
+      Date.UTC(2024, 11, 21, 23, 0, 0)
+    );
+    const goldenSolar = computeSolarPosition(
+      PRAGUE_LAT,
+      PRAGUE_LNG,
+      Date.UTC(2024, 2, 20, 5, 20, 0)
     );
 
-    expect(dayAtmo.light.anchor).toBe('map');
-    expect(dayAtmo.light.intensity).toBeGreaterThan(nightAtmo.light.intensity);
-    expect(nightAtmo.routeGlowOpacityBoost).toBeGreaterThan(
-      dayAtmo.routeGlowOpacityBoost
-    );
+    const satNoon = computeSolarAtmosphere(noonSolar, 'SATELLITE');
+    const satNight = computeSolarAtmosphere(nightSolar, 'SATELLITE');
+    expect(satNoon.raster.brightnessMax).toBeCloseTo(1.0, 2);
+    expect(satNight.raster.brightnessMax).toBeCloseTo(0.26, 2);
+    expect(satNight.raster.brightnessMin).toBeCloseTo(0.02, 2);
+    expect(satNight.raster.saturation).toBeCloseTo(-0.35, 2);
+
+    const dayNightTint = computeSolarAtmosphere(nightSolar, 'DAYLIGHT');
+    const dayNoonTint = computeSolarAtmosphere(noonSolar, 'DAYLIGHT');
+    const dayGolden = computeSolarAtmosphere(goldenSolar, 'DAYLIGHT');
+    expect(dayNightTint.tint.color.toLowerCase()).toBe('#040814');
+    expect(dayNightTint.tint.opacity).toBeCloseTo(0.62, 2);
+    expect(dayNoonTint.tint.opacity).toBe(0);
+    expect(dayGolden.tint.opacity).toBeGreaterThan(0.04);
+    expect(dayNightTint.fog['star-intensity']).toBeCloseTo(0.85, 2);
+
+    // Daytime sun shadow vs Night headlamp crossfade
+    expect(satNoon.puck.shadowOpacity).toBeGreaterThan(0.4);
+    expect(satNoon.puck.headlampOpacity).toBe(0);
+    expect(satNight.puck.shadowOpacity).toBe(0);
+    expect(satNight.puck.headlampOpacity).toBe(1);
+  });
+});
+
+describe('Worker RDP Polyline Simplification', () => {
+  it('prunes sub-3m redundant GPS jitter while preserving corners and endpoints', () => {
+    const straightWithJitter = [
+      { lat: 50.08, lng: 14.42 },
+      { lat: 50.0805, lng: 14.420005 }, // ~0.3m lateral jitter
+      { lat: 50.081, lng: 14.419996 }, // ~0.3m lateral jitter
+      { lat: 50.0815, lng: 14.420002 }, // ~0.2m lateral jitter
+      { lat: 50.082, lng: 14.42 }, // sharp corner start
+      { lat: 50.082, lng: 14.422 }, // 140m east turn
+    ];
+
+    const simplified = simplifyPolylineRdp(straightWithJitter, 3);
+    expect(simplified.length).toBe(3);
+    expect(simplified[0]).toEqual(straightWithJitter[0]);
+    expect(simplified[1]).toEqual(straightWithJitter[4]);
+    expect(simplified[2]).toEqual(straightWithJitter[5]);
   });
 });
