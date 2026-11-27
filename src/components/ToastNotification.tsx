@@ -12,7 +12,7 @@ export function ToastNotification({ toasts, onDismiss }: ToastNotificationProps)
   return (
     <div
       style={{ top: 'calc(env(safe-area-inset-top, 28px) + 56px)' }}
-      className="fixed left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 w-[min(92vw,420px)] pointer-events-none"
+      className="fixed left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 w-[min(92vw,400px)] pointer-events-none"
       role="status"
       aria-live="polite"
     >
@@ -23,12 +23,12 @@ export function ToastNotification({ toasts, onDismiss }: ToastNotificationProps)
         return (
           <div
             key={toast.id}
-            className={`pointer-events-auto flex items-start gap-3 px-4 py-3 rounded-xl border backdrop-blur-md shadow-2xl transition-all ${
+            className={`pointer-events-auto flex items-start gap-2.5 px-3.5 py-2.5 rounded-xl instrument-surface-strong transition-all ${
               isError
-                ? 'bg-rose-950/85 border-rose-500/40 text-rose-100'
+                ? 'border-rose-500/35'
                 : isSuccess
-                  ? 'bg-emerald-950/85 border-emerald-500/40 text-emerald-100'
-                  : 'bg-slate-900/90 border-white/15 text-slate-100'
+                  ? 'border-emerald-500/30'
+                  : 'border-white/[0.10]'
             }`}
           >
             <div className="mt-0.5 shrink-0">
@@ -41,9 +41,9 @@ export function ToastNotification({ toasts, onDismiss }: ToastNotificationProps)
               )}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-semibold tracking-wide">{toast.title}</p>
+              <p className="text-xs font-medium text-slate-100">{toast.title}</p>
               {toast.description && (
-                <p className="mt-0.5 text-[11px] leading-relaxed text-slate-300/90 break-words">
+                <p className="mt-0.5 text-[11px] leading-relaxed text-slate-400 break-words">
                   {toast.description}
                 </p>
               )}
@@ -52,7 +52,7 @@ export function ToastNotification({ toasts, onDismiss }: ToastNotificationProps)
               type="button"
               onClick={() => onDismiss(toast.id)}
               aria-label="Dismiss notification"
-              className="shrink-0 p-1 rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+              className="shrink-0 p-1 rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.08] active:scale-[0.98] transition-all"
             >
               <X className="w-3.5 h-3.5" />
             </button>

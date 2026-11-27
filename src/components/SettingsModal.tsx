@@ -1,6 +1,6 @@
-import { Check, Palette, Ruler, Sliders, Sparkles, X } from 'lucide-react';
+import { Check, Sliders, X } from 'lucide-react';
 import type { AccentThemeId, AppSettings, UnitSystem } from '../types/timeline';
-import { ACCENT_THEMES } from '../utils/settings';
+import { ACCENT_THEMES, APP_VERSION } from '../utils/settings';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -30,34 +30,29 @@ export function SettingsModal({
       aria-label="ChronoMap Settings"
     >
       <div
-        className="w-full max-w-md rounded-2xl bg-slate-950/92 border border-white/15 backdrop-blur-xl shadow-2xl overflow-hidden"
+        className="w-full max-w-md rounded-xl instrument-surface-strong overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="px-4 py-3.5 border-b border-white/10 flex items-center justify-between">
+        <div className="px-4 py-3 border-b border-white/[0.08] flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Sliders className="w-4 h-4" style={{ color: activeAccent.primary }} />
-            <h2 className="text-sm font-semibold text-white">
-              Appearance &amp; Settings
-            </h2>
+            <h2 className="text-sm font-semibold text-white">Settings</h2>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.07] active:scale-[0.98] transition-all"
             aria-label="Close settings"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="p-4 space-y-5 max-h-[78vh] overflow-y-auto obsidian-scroll">
+        <div className="p-4 space-y-5 max-h-[75vh] overflow-y-auto obsidian-scroll">
           {/* Accent Theme */}
           <div className="space-y-2">
-            <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-300">
-              <Palette className="w-3.5 h-3.5 text-slate-400" />
-              <span>Accent Theme</span>
-            </div>
+            <div className="text-xs font-medium text-slate-300">Accent theme</div>
             <div className="grid grid-cols-2 gap-2">
               {ACCENT_LIST.map((themeId) => {
                 const theme = ACCENT_THEMES[themeId];
@@ -67,23 +62,20 @@ export function SettingsModal({
                     key={themeId}
                     type="button"
                     onClick={() => onUpdateSettings({ accentTheme: themeId })}
-                    className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl border text-left transition-all"
+                    className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg border text-left active:scale-[0.98] transition-all"
                     style={{
                       backgroundColor: isSelected
                         ? theme.softBg
-                        : 'rgba(255,255,255,0.03)',
+                        : 'rgba(255,255,255,0.025)',
                       borderColor: isSelected
                         ? theme.border
-                        : 'rgba(255,255,255,0.08)',
+                        : 'rgba(255,255,255,0.07)',
                     }}
                   >
                     <div className="flex items-center gap-2 min-w-0">
                       <span
-                        className="w-3.5 h-3.5 rounded-full shrink-0 ring-2 ring-white/25"
-                        style={{
-                          backgroundColor: theme.primary,
-                          boxShadow: `0 0 10px ${theme.primary}`,
-                        }}
+                        className="w-3 h-3 rounded-full shrink-0 ring-1 ring-white/25"
+                        style={{ backgroundColor: theme.primary }}
                       />
                       <span className="text-xs font-medium text-slate-100 truncate">
                         {theme.name}
@@ -102,16 +94,13 @@ export function SettingsModal({
           </div>
 
           {/* Route Styling */}
-          <div className="space-y-3">
-            <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-300">
-              <Sparkles className="w-3.5 h-3.5 text-slate-400" />
-              <span>Route Styling</span>
-            </div>
+          <div className="space-y-2">
+            <div className="text-xs font-medium text-slate-300">Route line</div>
 
-            <div className="p-3 rounded-xl bg-white/[0.03] border border-white/10 space-y-3">
+            <div className="p-3 rounded-lg instrument-inset space-y-3">
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="text-slate-300">Path Thickness</span>
+                  <span className="text-slate-300">Stroke width</span>
                   <span className="font-mono text-slate-100 tabular-nums">
                     {settings.routeWidth}px
                   </span>
@@ -125,31 +114,28 @@ export function SettingsModal({
                   onChange={(e) =>
                     onUpdateSettings({ routeWidth: Number(e.target.value) })
                   }
-                  className="w-full accent-cyan-400 cursor-pointer"
+                  className="w-full cursor-pointer"
                   style={{ accentColor: activeAccent.primary }}
                 />
-                {/* Live line preview */}
-                <div className="h-6 rounded-lg bg-slate-900/90 flex items-center justify-center px-4 overflow-hidden">
+                <div className="h-6 rounded-lg bg-[#070A0F] border border-white/[0.06] flex items-center justify-center px-4 overflow-hidden">
                   <div
                     className="w-full rounded-full transition-all"
                     style={{
                       height: `${settings.routeWidth}px`,
                       backgroundColor: activeAccent.primary,
-                      boxShadow: settings.routeGlow
-                        ? `0 0 ${settings.routeWidth * 3}px ${activeAccent.primary}`
-                        : 'none',
+                      opacity: settings.routeGlow ? 0.96 : 0.85,
                     }}
                   />
                 </div>
               </div>
 
-              <div className="flex items-center justify-between pt-1 border-t border-white/10">
+              <div className="flex items-center justify-between pt-2.5 border-t border-white/[0.07]">
                 <div>
                   <div className="text-xs font-medium text-slate-200">
-                    Neon Route Glow
+                    Route halo
                   </div>
-                  <div className="text-[10px] text-slate-400">
-                    Render outer bloom aura around traveled routes
+                  <div className="text-[11px] text-slate-400">
+                    Subtle outer luminescence behind active paths
                   </div>
                 </div>
                 <button
@@ -159,18 +145,18 @@ export function SettingsModal({
                   onClick={() =>
                     onUpdateSettings({ routeGlow: !settings.routeGlow })
                   }
-                  className="relative inline-flex h-6 w-11 items-center rounded-full transition-colors border"
+                  className="relative inline-flex h-6 w-11 items-center rounded-full active:scale-[0.98] transition-colors border"
                   style={{
                     backgroundColor: settings.routeGlow
                       ? activeAccent.primary
-                      : 'rgba(30, 41, 59, 0.9)',
+                      : 'rgba(30, 41, 59, 0.8)',
                     borderColor: settings.routeGlow
                       ? activeAccent.border
-                      : 'rgba(255,255,255,0.15)',
+                      : 'rgba(255,255,255,0.12)',
                   }}
                 >
                   <span
-                    className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
                       settings.routeGlow ? 'translate-x-5' : 'translate-x-1'
                     }`}
                   />
@@ -179,17 +165,14 @@ export function SettingsModal({
             </div>
           </div>
 
-          {/* Units */}
+          {/* Measurement Units */}
           <div className="space-y-2">
-            <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-300">
-              <Ruler className="w-3.5 h-3.5 text-slate-400" />
-              <span>Measurement Units</span>
-            </div>
-            <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-slate-900/90 border border-white/10">
+            <div className="text-xs font-medium text-slate-300">Units</div>
+            <div className="grid grid-cols-2 gap-1.5 p-1 rounded-lg instrument-inset">
               {(
                 [
-                  { id: 'METRIC', label: 'Metric', sub: 'km / km/h' },
-                  { id: 'IMPERIAL', label: 'Imperial', sub: 'mi / mph' },
+                  { id: 'METRIC', label: 'Metric', sub: 'km · km/h' },
+                  { id: 'IMPERIAL', label: 'Imperial', sub: 'mi · mph' },
                 ] as { id: UnitSystem; label: string; sub: string }[]
               ).map((opt) => {
                 const active = settings.units === opt.id;
@@ -198,20 +181,28 @@ export function SettingsModal({
                     key={opt.id}
                     type="button"
                     onClick={() => onUpdateSettings({ units: opt.id })}
-                    className="px-3 py-2 rounded-lg text-center transition-all border"
+                    className="px-3 py-2 rounded-md text-center active:scale-[0.98] transition-all border"
                     style={{
                       backgroundColor: active ? activeAccent.softBg : 'transparent',
                       borderColor: active ? activeAccent.border : 'transparent',
                       color: active ? activeAccent.text : '#94a3b8',
                     }}
                   >
-                    <div className="text-xs font-semibold">{opt.label}</div>
-                    <div className="text-[10px] opacity-80">{opt.sub}</div>
+                    <div className="text-xs font-medium">{opt.label}</div>
+                    <div className="text-[10px] opacity-75 font-mono">{opt.sub}</div>
                   </button>
                 );
               })}
             </div>
           </div>
+        </div>
+
+        {/* Subtle Footer with Semantic Version */}
+        <div className="px-4 py-2.5 border-t border-white/[0.08] flex items-center justify-between text-[11px] text-slate-500">
+          <span>100% client-side · Zero telemetry</span>
+          <span className="font-mono tabular-nums text-slate-400">
+            ChronoMap {APP_VERSION}
+          </span>
         </div>
       </div>
     </div>

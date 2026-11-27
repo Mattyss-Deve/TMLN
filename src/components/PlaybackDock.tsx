@@ -1,5 +1,13 @@
 import { useCallback, useRef, useState } from 'react';
-import { Pause, Play, Repeat, SkipBack, SkipForward } from 'lucide-react';
+import {
+  Camera,
+  Loader2,
+  Pause,
+  Play,
+  Repeat,
+  SkipBack,
+  SkipForward,
+} from 'lucide-react';
 import { SPEED_PRESETS } from '../engine/animationController';
 import type {
   AccentThemeId,
@@ -28,6 +36,8 @@ interface PlaybackDockProps {
   onStepSegment: (delta: -1 | 1) => void;
   onSelectSpeed: (preset: SpeedPreset) => void;
   onToggleLoop: () => void;
+  onExportPostcard: () => void;
+  isExportingPostcard: boolean;
 }
 
 export function PlaybackDock({
@@ -41,6 +51,8 @@ export function PlaybackDock({
   onStepSegment,
   onSelectSpeed,
   onToggleLoop,
+  onExportPostcard,
+  isExportingPostcard,
 }: PlaybackDockProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const [hoverProgress, setHoverProgress] = useState<number | null>(null);
@@ -85,7 +97,6 @@ export function PlaybackDock({
   if (!trip || !frame) return null;
 
   const displayProgress = dragProgress ?? frame.progress;
-
   const accent = ACCENT_THEMES[accentTheme];
   const totalSpan = Math.max(1, trip.endTimeMs - trip.startTimeMs);
   const hoverTimeMs =
@@ -116,27 +127,27 @@ export function PlaybackDock({
         sidebarOpen ? 'left-3 md:left-[356px]' : 'left-3'
       }`}
     >
-      <div className="pointer-events-auto w-full max-w-[760px] rounded-2xl bg-slate-950/85 border border-white/10 backdrop-blur-md shadow-2xl px-4 py-3 space-y-2.5">
-        {/* Top Row: Trip Summary & Time Window */}
-        <div className="flex items-center justify-between gap-3 text-[11px]">
+      <div className="pointer-events-auto w-full max-w-[740px] instrument-surface rounded-xl px-3.5 py-2.5 space-y-2">
+        {/* Top Row: Route Title & Elapsed Window */}
+        <div className="flex items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="font-semibold text-slate-100 truncate">
+            <span className="font-medium text-slate-100 truncate">
               {trip.title}
             </span>
-            <span className="hidden sm:inline text-slate-500">·</span>
-            <span className="hidden sm:inline text-slate-400 tabular-nums shrink-0">
+            <span className="hidden sm:inline text-slate-600">·</span>
+            <span className="hidden sm:inline text-[11px] text-slate-400 tabular-nums shrink-0">
               {formatDistance(trip.distanceM, units)} · {formatDuration(trip.durationMs)}
             </span>
           </div>
 
           <div className="font-mono text-[11px] text-slate-300 tabular-nums shrink-0">
             <span>{formatClock(frame.currentTimeMs)}</span>
-            <span className="text-slate-500 mx-1">/</span>
+            <span className="text-slate-600 mx-1">/</span>
             <span className="text-slate-400">{formatShortTime(trip.endTimeMs)}</span>
           </div>
         </div>
 
-        {/* Interactive Scrubber with Color-Coded Segments */}
+        {/* Interactive Scrubber Track */}
         <div
           ref={trackRef}
           onPointerDown={handlePointerDown}
@@ -150,19 +161,19 @@ export function PlaybackDock({
           aria-valuemax={100}
           aria-valuenow={Math.round(displayProgress * 100)}
           tabIndex={0}
-          className="relative h-7 flex items-center cursor-pointer group select-none touch-none"
+          className="relative h-6 flex items-center cursor-pointer group select-none touch-none"
         >
           {hoverProgress !== null && hoverTimeMs !== null && (
             <div
-              className="absolute -top-9 -translate-x-1/2 px-2.5 py-1 rounded-lg bg-slate-900/95 border border-white/15 text-[10px] text-slate-100 whitespace-nowrap shadow-xl pointer-events-none z-10 flex items-center gap-1.5"
-              style={{ left: `${clamp(hoverProgress * 100, 6, 94)}%` }}
+              className="absolute -top-8 -translate-x-1/2 px-2 py-0.5 rounded-lg instrument-surface-strong text-[11px] text-slate-100 whitespace-nowrap pointer-events-none z-10 flex items-center gap-1.5"
+              style={{ left: `${clamp(hoverProgress * 100, 7, 93)}%` }}
             >
-              <span className="font-mono font-semibold tabular-nums">
+              <span className="font-mono font-medium tabular-nums">
                 {formatClock(hoverTimeMs)}
               </span>
               {hoverSegment && (
                 <>
-                  <span className="text-slate-500">·</span>
+                  <span className="text-slate-600">·</span>
                   <span style={{ color: MODE_COLORS[hoverSegment.mode] }}>
                     {hoverSegment.kind === 'VISIT'
                       ? hoverSegment.label
@@ -173,7 +184,7 @@ export function PlaybackDock({
             </div>
           )}
 
-          <div className="relative w-full h-2.5 rounded-full bg-slate-800/90 overflow-hidden flex">
+          <div className="relative w-full h-2 rounded-full bg-white/[0.08] overflow-hidden flex">
             {trip.segments.map((seg) => {
               const leftPct = ((seg.startTimeMs - trip.startTimeMs) / totalSpan) * 100;
               const widthPct = Math.max(
@@ -189,15 +200,15 @@ export function PlaybackDock({
                     left: `${leftPct}%`,
                     width: `${widthPct}%`,
                     backgroundColor: color,
-                    opacity: seg.kind === 'VISIT' ? 0.35 : 0.78,
+                    opacity: seg.kind === 'VISIT' ? 0.3 : 0.82,
                   }}
-                  className="h-full border-r border-slate-950/60"
+                  className="h-full border-r border-[#0B0E14]/60"
                 />
               );
             })}
 
             <div
-              className="absolute top-0 right-0 bottom-0 bg-slate-950/65 pointer-events-none"
+              className="absolute top-0 right-0 bottom-0 bg-[#0B0E14]/68 pointer-events-none"
               style={{ left: `${displayProgress * 100}%` }}
             />
           </div>
@@ -208,7 +219,7 @@ export function PlaybackDock({
               <div
                 key={v.id}
                 style={{ left: `${posPct}%` }}
-                className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-3.5 rounded-full bg-white/75 ring-1 ring-slate-950 pointer-events-none"
+                className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 w-1 h-3 rounded-full bg-white/70 ring-1 ring-[#0B0E14] pointer-events-none"
               />
             );
           })}
@@ -216,46 +227,44 @@ export function PlaybackDock({
           <div
             style={{
               left: `${displayProgress * 100}%`,
-              boxShadow: `0 0 12px ${accent.primary}`,
               borderColor: accent.primary,
             }}
-            className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-white border-2 group-hover:scale-110 transition-transform pointer-events-none"
+            className="absolute top-1/2 -translate-x-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full bg-white border-2 group-hover:scale-110 transition-transform pointer-events-none"
           />
         </div>
 
-        {/* Bottom Controls Row */}
+        {/* Bottom Instrument Controls */}
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1">
             <button
               type="button"
               onClick={() => onStepSegment(-1)}
-              className="p-2 rounded-xl bg-white/[0.04] hover:bg-white/10 border border-white/5 text-slate-300 hover:text-white transition-colors"
+              className="p-2 rounded-lg instrument-inset hover:bg-white/[0.08] text-slate-300 hover:text-white active:scale-[0.98] transition-all"
               title="Previous segment (Left Arrow)"
               aria-label="Previous segment"
             >
-              <SkipBack className="w-4 h-4" />
+              <SkipBack className="w-3.5 h-3.5" />
             </button>
 
             <button
               type="button"
               onClick={onTogglePlay}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-xl font-semibold text-xs shadow-lg transition-all hover:brightness-110"
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg font-medium text-xs active:scale-[0.98] transition-all hover:brightness-110"
               style={{
                 backgroundColor: accent.buttonBg,
                 color: accent.buttonText,
-                boxShadow: `0 6px 20px ${accent.glow}`,
               }}
               title={frame.isPlaying ? 'Pause (Space)' : 'Play (Space)'}
               aria-label={frame.isPlaying ? 'Pause playback' : 'Play playback'}
             >
               {frame.isPlaying ? (
                 <>
-                  <Pause className="w-4 h-4 fill-current" />
+                  <Pause className="w-3.5 h-3.5 fill-current" />
                   <span>Pause</span>
                 </>
               ) : (
                 <>
-                  <Play className="w-4 h-4 fill-current" />
+                  <Play className="w-3.5 h-3.5 fill-current" />
                   <span>Play</span>
                 </>
               )}
@@ -264,31 +273,47 @@ export function PlaybackDock({
             <button
               type="button"
               onClick={() => onStepSegment(1)}
-              className="p-2 rounded-xl bg-white/[0.04] hover:bg-white/10 border border-white/5 text-slate-300 hover:text-white transition-colors"
+              className="p-2 rounded-lg instrument-inset hover:bg-white/[0.08] text-slate-300 hover:text-white active:scale-[0.98] transition-all"
               title="Next segment (Right Arrow)"
               aria-label="Next segment"
             >
-              <SkipForward className="w-4 h-4" />
+              <SkipForward className="w-3.5 h-3.5" />
             </button>
 
             <button
               type="button"
               onClick={onToggleLoop}
-              className="p-2 rounded-xl border transition-colors"
+              className="p-2 rounded-lg border active:scale-[0.98] transition-all"
               style={{
-                backgroundColor: frame.loop ? accent.softBg : 'rgba(255,255,255,0.04)',
-                borderColor: frame.loop ? accent.border : 'rgba(255,255,255,0.06)',
+                backgroundColor: frame.loop ? accent.softBg : 'rgba(255,255,255,0.03)',
+                borderColor: frame.loop ? accent.border : 'rgba(255,255,255,0.07)',
                 color: frame.loop ? accent.text : '#94a3b8',
               }}
               title="Toggle loop"
               aria-label="Toggle loop"
             >
-              <Repeat className="w-4 h-4" />
+              <Repeat className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              type="button"
+              onClick={onExportPostcard}
+              disabled={isExportingPostcard}
+              className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg instrument-inset hover:bg-white/[0.08] text-slate-200 hover:text-white text-xs font-medium active:scale-[0.98] transition-all disabled:opacity-50"
+              title="Export 1080×1350 Route Postcard"
+              aria-label="Share route postcard"
+            >
+              {isExportingPostcard ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ color: accent.primary }} />
+              ) : (
+                <Camera className="w-3.5 h-3.5" style={{ color: accent.primary }} />
+              )}
+              <span className="hidden sm:inline">Share Card</span>
             </button>
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
-            <div className="flex items-center p-0.5 rounded-xl bg-slate-900/90 border border-white/10">
+            <div className="flex items-center p-0.5 rounded-lg instrument-inset">
               {multiplierPresets.map((preset) => {
                 const active = isSamePreset(frame.speedPreset, preset);
                 return (
@@ -296,7 +321,7 @@ export function PlaybackDock({
                     key={preset.label}
                     type="button"
                     onClick={() => onSelectSpeed(preset)}
-                    className="px-2 py-1 rounded-lg text-[11px] font-mono font-medium transition-all border"
+                    className="px-2 py-1 rounded-md text-[11px] font-mono font-medium tabular-nums active:scale-[0.98] transition-all border"
                     style={{
                       backgroundColor: active ? accent.softBg : 'transparent',
                       borderColor: active ? accent.border : 'transparent',
@@ -309,7 +334,7 @@ export function PlaybackDock({
               })}
             </div>
 
-            <div className="flex items-center p-0.5 rounded-xl bg-slate-900/90 border border-white/10">
+            <div className="flex items-center p-0.5 rounded-lg instrument-inset">
               {fitPresets.map((preset) => {
                 const active = isSamePreset(frame.speedPreset, preset);
                 return (
@@ -317,10 +342,10 @@ export function PlaybackDock({
                     key={preset.label}
                     type="button"
                     onClick={() => onSelectSpeed(preset)}
-                    className={`px-2 py-1 rounded-lg text-[11px] font-medium transition-all ${
+                    className={`px-2 py-1 rounded-md text-[11px] font-medium tabular-nums active:scale-[0.98] transition-all border ${
                       active
-                        ? 'bg-emerald-400/20 text-emerald-200 border border-emerald-400/40'
-                        : 'text-slate-400 hover:text-slate-100 border border-transparent'
+                        ? 'bg-emerald-500/15 text-emerald-200 border-emerald-400/35'
+                        : 'text-slate-400 hover:text-slate-100 border-transparent'
                     }`}
                   >
                     {preset.label}
@@ -330,7 +355,7 @@ export function PlaybackDock({
             </div>
 
             {frame.speedPreset.kind === 'FIT_DURATION' && (
-              <span className="hidden md:inline-block text-[10px] font-mono text-slate-400 tabular-nums px-1">
+              <span className="hidden md:inline-block text-[10px] font-mono text-slate-400 tabular-nums px-0.5">
                 ~{Math.round(frame.effectiveMultiplier)}x
               </span>
             )}

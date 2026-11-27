@@ -1,4 +1,4 @@
-# ChronoMap — Private Google Timeline Replay
+# ChronoMap — Private Google Timeline Replay (`v1.2.0`)
 
 A privacy-first, 100% client-side web application, installable PWA, and Capacitor Android app for importing Google Timeline `.json` exports and replaying journeys with a 60fps MapLibre GL animation engine. Zero location data ever leaves the device.
 
@@ -9,24 +9,23 @@ A privacy-first, 100% client-side web application, installable PWA, and Capacito
   - **Classic Semantic Location History** (`timelineObjects`, `activitySegment`, `placeVisit`, E7 coordinates)
   - **Raw `Records.json`** (`locations` array with dwell clustering and activity inference)
   - Keeps 40MB+ parsed trips cached inside the Web Worker, transferring only lightweight day/journey summaries to the UI and loading full waypoints lazily on selection.
+- **Instant IndexedDB Persistence (`src/utils/storage.ts`)**
+  - Automatically persists the imported Google Timeline `.json` file locally in IndexedDB (`chronomap-cache-v1`) so reopening ChronoMap restores multi-year history immediately without re-importing, paired with a quick **Load New JSON** action in the sidebar.
 - **60fps Pre-Baked Spline, GPU Shader Route Progress & 3D Map Engine (`src/engine/animationController.ts`, `src/utils/lineGradient.ts`, `src/components/MapCanvas.tsx`)**
   - Pre-bakes the full Catmull-Rom smoothed spline, Web Mercator geometric `lineProgress`, bearings, speeds, and cumulative distances into flat typed arrays once per trip so `requestAnimationFrame` performs zero allocations or spline math per frame.
   - **Zero-CPU GPU Route Progress:** Uploads static `LineString` GeoJSON once with `lineMetrics: true` and reveals traveled segments on the GPU via `line-gradient` shader stops while updating the puck directly with `marker.setLngLat()` (zero per-frame `setData()`).
   - **Corridor Pre-Staging Loader:** Frames each trip's bounding box (`maxZoom: 15`) with a translucent progress bar overlay (`Staging 3D Corridor...`) to warm MapLibre's GPU tile cache (`maxTileCacheSize: 250`, capped `pixelRatio <= 1.75`, `fadeDuration: 0`) with a 2.2-second timeout fallback before snapping smoothly to the starting viewpoint.
   - **3 Map Styles + 3D Buildings Mode:** Obsidian Dark (Carto), Satellite Hybrid (Esri World Imagery + Carto labels), and Daylight 3D (OpenFreeMap Liberty), plus extruded OpenFreeMap 3D buildings (`fill-extrusion`) without heavy DEM terrain draping.
   - Four camera modes: **Chase** (`52°` in 3D), **Drone Chase** (`56°` spline pitch), **Overview**, and **Free** with one-click **Re-center**.
-- **Reverse Geocoding, Custom Nicknames & All-Time Heatmap (`src/utils/geocoder.ts`, `src/components/StatsModal.tsx`, `src/components/SettingsModal.tsx`)**
+- **Route Postcard Export (`src/utils/postcard.ts`)**
+  - Captures the live WebGL canvas (`preserveDrawingBuffer: true`) into a framed **1080×1350** editorial route postcard with date, title, distance, duration, mode pills, and `ChronoMap v1.2.0` footer, opening the native Share Sheet (`navigator.share`) or downloading a PNG.
+- **Smart Discovery, Reverse Geocoding & All-Time Heatmap (`src/components/TripSidebar.tsx`, `src/utils/geocoder.ts`, `src/components/StatsModal.tsx`)**
+  - Star/bookmark toggles on trip and day rows (persisted in `localStorage`) plus quick filter tabs: **All**, **Starred**, **On This Day**, and **Longest**.
   - Rate-limited Nominatim reverse-geocoding (1 req/sec) and tap-to-rename visit nicknames persisted in `localStorage`.
-  - All-Time Stats & Heatmap modal with lifetime mode breakdowns (Subway, Tram, Bus, Train, Walk, Driving, Cycling, Flight), Top 10 visited places, and toggleable map heatmap overlay.
-  - Appearance & Settings drawer for Accent Theme, route thickness/glow, and Metric/Imperial units.
-- **Built-in Multi-Modal Sample Journey (`src/data/sampleJourney.ts`)**
-  - Realistic Bay Area & Pacific Coast multi-day dataset covering walking, rail transit, driving, cycling, flight, and timed landmark visits.
-- **Obsidian Glassmorphic HUD & Android Safe-Area Support**
-  - Collapsible Trip Explorer (`TripSidebar`) with **By Day** / **Individual Journeys** toggle, Year/Month dropdown, date picker, and search.
-  - Safe-area-aware top HUD (`TelemetryHUD`), camera switcher, and Media Playback Dock (`PlaybackDock`) with real-time multipliers (`1x`–`300x`) and normalized fit presets (`Fit 15s`, `Fit 30s`, `Fit 60s`).
-- **Installable PWA & Capacitor Android App**
-  - PWA manifest (`public/manifest.webmanifest`), PNG/SVG icons (`public/icons/`), and Service Worker (`public/sw.js`).
-  - Native Android Capacitor wrapper (`android/`, app ID `com.chronomap.app`, `INTERNET` permission enabled in `android/app/src/main/AndroidManifest.xml`).
+  - All-Time Stats & Heatmap modal with lifetime mode breakdowns, Top 10 visited places, and toggleable map heatmap overlay.
+- **Tactile Instrument HUD & Custom Adaptive App Icon (`scripts/generate_app_icons.py`)**
+  - Matte obsidian instrument surfaces (`rgba(11, 14, 20, 0.86)` with `backdrop-blur-xl`), crisp `1px` hairlines, unified top control strip, compact horizontal telemetry readout, and strict `tabular-nums` typography.
+  - Bespoke Pillow-generated Android adaptive/legacy launcher icons (`android/app/src/main/res/mipmap-*`) and PWA icons (`public/icons/icon-{192,512}.png`).
 
 ## Local Development
 
@@ -37,7 +36,19 @@ npm run build
 npm run dev
 ```
 
-Open `http://127.0.0.1:5173` in a WebGL-capable browser.
+Regenerate Android adaptive launcher icons & PWA icons (requires Pillow):
+
+```bash
+python scripts/generate_app_icons.py
+```
+
+## Versioning Convention
+
+ChronoMap follows **Semantic Versioning (`MAJOR.MINOR.PATCH`)**. When cutting a new release, bump all three version locations together before syncing Android:
+
+1. **`package.json`**: update `"version": "X.Y.Z"`.
+2. **`android/app/build.gradle`**: increment `versionCode` by `1` (monotonic integer required by Android for in-place APK upgrades) and update `versionName "X.Y.Z"`.
+3. **`src/utils/settings.ts`**: update `export const APP_VERSION = 'vX.Y.Z';` (displayed subtly in the `SettingsModal` and `TripSidebar` footers and on exported Route Postcards).
 
 ## GitHub Actions & Android APK Builds
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { type MutableRefObject, useCallback, useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import type { AnimationController } from '../engine/animationController';
 import type {
@@ -95,6 +95,7 @@ interface MapCanvasProps {
   heatmapGeoJson: GeoJSON.FeatureCollection | null;
   nicknames: Record<string, string>;
   geocodeCache: Record<string, string>;
+  mapInstanceRef?: MutableRefObject<maplibregl.Map | null>;
   onStagingChange?: (state: CorridorStagingState) => void;
   onMapError?: (message: string) => void;
 }
@@ -198,11 +199,16 @@ export function MapCanvas({
   heatmapGeoJson,
   nicknames,
   geocodeCache,
+  mapInstanceRef,
   onStagingChange,
   onMapError,
 }: MapCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
+  const externalMapRef = useRef<MutableRefObject<maplibregl.Map | null> | undefined>(
+    mapInstanceRef
+  );
+  externalMapRef.current = mapInstanceRef;
   const styleLoadedRef = useRef(false);
   const appliedStyleIdRef = useRef<MapStyleId>(settings.mapStyle);
   const [styleRevision, setStyleRevision] = useState(0);
@@ -892,6 +898,7 @@ export function MapCanvas({
       fadeDuration: 0,
       pixelRatio: Math.min(window.devicePixelRatio || 1, 1.75),
       maxTileCacheSize: 250,
+      preserveDrawingBuffer: true,
       attributionControl: false,
     });
 
@@ -900,6 +907,9 @@ export function MapCanvas({
       'bottom-right'
     );
     mapRef.current = map;
+    if (externalMapRef.current) {
+      externalMapRef.current.current = map;
+    }
 
     const unlockToFreeMode = (ev: { originalEvent?: unknown }) => {
       if (!ev.originalEvent || isStagingRef.current) return;
@@ -937,6 +947,9 @@ export function MapCanvas({
       puckRef.current = null;
       map.remove();
       mapRef.current = null;
+      if (externalMapRef.current) {
+        externalMapRef.current.current = null;
+      }
     };
   }, [syncCustomSourcesAndLayers]);
 

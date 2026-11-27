@@ -13,8 +13,32 @@
     margin: 0;
     padding: 0;
     overflow: hidden;
-    background-color: #070a0f;
+    background-color: #0a0d14;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
+}
+
+/* Tactile instrument matte surfaces & hairlines */
+.instrument-surface {
+  background-color: rgba(11, 14, 20, 0.86);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.42);
+}
+
+.instrument-surface-strong {
+  background-color: rgba(11, 14, 20, 0.94);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.56);
+}
+
+.instrument-inset {
+  background-color: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
 }
 
 .tabular-nums {
@@ -33,10 +57,10 @@
   padding-bottom: max(env(safe-area-inset-bottom, 0px), 12px);
 }
 
-/* Custom obsidian scrollbar */
+/* Subtle matte scrollbar */
 .obsidian-scroll::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 
 .obsidian-scroll::-webkit-scrollbar-track {
@@ -44,26 +68,26 @@
 }
 
 .obsidian-scroll::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.22);
+  background: rgba(148, 163, 184, 0.2);
   border-radius: 9999px;
 }
 
 .obsidian-scroll::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.4);
+  background: rgba(148, 163, 184, 0.36);
 }
 
 /* Pulsing location puck animations */
 @keyframes puck-sonar {
   0% {
     transform: translate(-50%, -50%) scale(0.55);
-    opacity: 0.85;
+    opacity: 0.78;
   }
   70% {
-    transform: translate(-50%, -50%) scale(2.15);
+    transform: translate(-50%, -50%) scale(2.1);
     opacity: 0;
   }
   100% {
-    transform: translate(-50%, -50%) scale(2.15);
+    transform: translate(-50%, -50%) scale(2.1);
     opacity: 0;
   }
 }
@@ -72,11 +96,11 @@
   0%,
   100% {
     transform: scale(1);
-    opacity: 0.75;
+    opacity: 0.7;
   }
   50% {
-    transform: scale(1.35);
-    opacity: 0.2;
+    transform: scale(1.32);
+    opacity: 0.18;
   }
 }
 
@@ -88,15 +112,15 @@
   animation: visit-pulse 2s ease-in-out infinite;
 }
 
-/* MapLibre attribution compact styling for obsidian UI */
+/* MapLibre attribution compact styling */
 .maplibregl-ctrl-attrib {
-  background-color: rgba(7, 10, 15, 0.65) !important;
-  color: rgba(148, 163, 184, 0.65) !important;
-  backdrop-filter: blur(8px);
+  background-color: rgba(11, 14, 20, 0.72) !important;
+  color: rgba(148, 163, 184, 0.62) !important;
+  backdrop-filter: blur(10px);
   border-radius: 6px 0 0 0;
   font-size: 10px !important;
 }
 
 .maplibregl-ctrl-attrib a {
-  color: rgba(148, 163, 184, 0.85) !important;
+  color: rgba(148, 163, 184, 0.82) !important;
 }

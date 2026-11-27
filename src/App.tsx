@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type maplibregl from 'maplibre-gl';
 import {
   Box,
   ChevronRight,
@@ -12,7 +13,6 @@ import {
   Navigation2,
   Satellite,
   Settings,
-  ShieldCheck,
   Sparkles,
   Sun,
   UploadCloud,
@@ -47,7 +47,20 @@ import {
   ReverseGeocoderQueue,
   saveNickname,
 } from './utils/geocoder';
-import { ACCENT_THEMES, loadSettings, saveSettings } from './utils/settings';
+import { exportRoutePostcard } from './utils/postcard';
+import {
+  ACCENT_THEMES,
+  APP_VERSION,
+  loadSettings,
+  saveSettings,
+} from './utils/settings';
+import {
+  loadStarredTripIds,
+  loadTimelineFromIndexedDB,
+  saveStarredTripIds,
+  saveTimelineToIndexedDB,
+  toggleStarredTripId,
+} from './utils/storage';
 import { useTimelineWorker, type WorkerParseResult } from './workers/TimelineWorker';
 
 export default function App() {
@@ -74,6 +87,11 @@ export default function App() {
   const [activeTrip, setActiveTrip] = useState<Trip | null>(null);
   const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
   const [isLoadingTrip, setIsLoadingTrip] = useState(false);
+
+  const [cachedFileName, setCachedFileName] = useState<string | null>(null);
+  const [isRestoringCache, setIsRestoringCache] = useState(false);
+  const [starredIds, setStarredIds] = useState<string[]>(() => loadStarredTripIds());
+  const [isExportingPostcard, setIsExportingPostcard] = useState(false);
 
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [heatmapGeoJson, setHeatmapGeoJson] =
@@ -105,8 +123,10 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   const fileDropInputRef = useRef<HTMLInputElement>(null);
+  const mapInstanceRef = useRef<maplibregl.Map | null>(null);
   const tripFetchSeqRef = useRef(0);
   const geocoderRef = useRef<ReverseGeocoderQueue | null>(null);
+  const hasAttemptedRestoreRef = useRef(false);
 
   const accent = ACCENT_THEMES[settings.accentTheme];
 
@@ -114,6 +134,14 @@ export default function App() {
     setSettings((prev) => {
       const next = { ...prev, ...patch };
       saveSettings(next);
+      return next;
+    });
+  }, []);
+
+  const handleToggleStar = useCallback((id: string) => {
+    setStarredIds((prev) => {
+      const next = toggleStarredTripId(prev, id);
+      saveStarredTripIds(next);
       return next;
     });
   }, []);
@@ -132,7 +160,7 @@ export default function App() {
       setToasts((prev) => [...prev.slice(-2), { id, kind, title, description }]);
       window.setTimeout(() => {
         setToasts((prev) => prev.filter((t) => t.id !== id));
-      }, 5500);
+      }, 4800);
     },
     []
   );
@@ -175,7 +203,11 @@ export default function App() {
   }, [controller]);
 
   const applyWorkerParseResult = useCallback(
-    (result: WorkerParseResult, autoPlay: boolean) => {
+    (
+      result: WorkerParseResult,
+      autoPlay: boolean,
+      options?: { restoredName?: string }
+    ) => {
       setSummaryIndex(result.index);
       setViewMode(result.initialViewMode);
       setActiveTrip(result.initialTrip);
@@ -193,17 +225,49 @@ export default function App() {
       const { stats } = result.index;
       pushToast(
         'success',
-        `Loaded ${stats.totalDays} ${stats.totalDays === 1 ? 'day' : 'days'} · ${
-          stats.totalTrips
-        } journeys (${formatSchemaName(stats.schema)})`,
-        `${stats.totalWaypoints.toLocaleString()} waypoints · ${formatDistance(
+        options?.restoredName
+          ? `Restored ${options.restoredName}`
+          : `Loaded ${stats.totalDays} ${stats.totalDays === 1 ? 'day' : 'days'} · ${
+              stats.totalTrips
+            } journeys`,
+        `${formatSchemaName(stats.schema)} · ${formatDistance(
           stats.totalDistanceM,
           settings.units
-        )} · parsed in ${stats.parseDurationMs}ms`
+        )} · ${stats.parseDurationMs}ms`
       );
     },
     [controller, pushToast, settings.units]
   );
+
+  // Restore last imported timeline automatically from IndexedDB on launch
+  useEffect(() => {
+    if (hasAttemptedRestoreRef.current) return;
+    hasAttemptedRestoreRef.current = true;
+
+    let cancelled = false;
+    const restore = async () => {
+      setIsRestoringCache(true);
+      try {
+        const record = await loadTimelineFromIndexedDB();
+        if (cancelled || !record) return;
+        const result = await parseFile(record.file);
+        if (cancelled) return;
+        setCachedFileName(record.fileName);
+        applyWorkerParseResult(result, false, { restoredName: record.fileName });
+      } catch {
+        // Ignore stale or unreadable cache gracefully
+      } finally {
+        if (!cancelled) {
+          setIsRestoringCache(false);
+        }
+      }
+    };
+
+    void restore();
+    return () => {
+      cancelled = true;
+    };
+  }, [parseFile, applyWorkerParseResult]);
 
   const handleFileSelected = useCallback(
     async (file: File) => {
@@ -221,7 +285,9 @@ export default function App() {
 
       try {
         const result = await parseFile(file);
+        setCachedFileName(file.name);
         applyWorkerParseResult(result, false);
+        void saveTimelineToIndexedDB(file, file.name);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Unable to parse file.';
         if (msg !== 'Parsing cancelled.') {
@@ -236,6 +302,7 @@ export default function App() {
     try {
       const sampleJson = createSampleTimelineJson();
       const result = await parseText(sampleJson);
+      setCachedFileName(null);
       applyWorkerParseResult(result, true);
     } catch (err) {
       const msg =
@@ -314,6 +381,47 @@ export default function App() {
       setShowHeatmap(true);
     }
   }, [showHeatmap, heatmapGeoJson, getHeatmap, pushToast]);
+
+  const handleExportPostcard = useCallback(async () => {
+    if (!activeTrip || isExportingPostcard) return;
+    const map = mapInstanceRef.current;
+    if (!map) {
+      pushToast('error', 'Map not ready', 'Wait for the map canvas to finish loading.');
+      return;
+    }
+
+    setIsExportingPostcard(true);
+    try {
+      // Ensure the WebGL drawing buffer has a fresh rendered frame before snapshot
+      map.triggerRepaint();
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => resolve());
+      });
+
+      const outcome = await exportRoutePostcard({
+        mapCanvas: map.getCanvas(),
+        trip: activeTrip,
+        units: settings.units,
+        accentTheme: settings.accentTheme,
+      });
+
+      if (outcome === 'shared') {
+        pushToast('success', 'Route postcard shared', `${activeTrip.title} · 1080×1350`);
+      } else if (outcome === 'downloaded') {
+        pushToast(
+          'success',
+          'Route postcard saved',
+          `Saved chronomap-${activeTrip.dateKey}.png (1080×1350)`
+        );
+      }
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Unable to capture map snapshot.';
+      pushToast('error', 'Postcard export failed', msg);
+    } finally {
+      setIsExportingPostcard(false);
+    }
+  }, [activeTrip, isExportingPostcard, settings.units, settings.accentTheme, pushToast]);
 
   const handleSelectCameraMode = useCallback((nextMode: CameraMode) => {
     setCameraMode((prev) => {
@@ -409,154 +517,46 @@ export default function App() {
       : summaryIndex.journeys.length
     : 0;
 
-  const renderMapStylePill = (compact = false) => {
-    const styles: { id: MapStyleId; label: string; icon: JSX.Element }[] = [
-      { id: 'DARK', label: 'Dark', icon: <Moon className="w-3 h-3" /> },
-      { id: 'SATELLITE', label: 'Sat', icon: <Satellite className="w-3 h-3" /> },
-      { id: 'DAYLIGHT', label: 'Day', icon: <Sun className="w-3 h-3" /> },
-    ];
+  const mapStyles: { id: MapStyleId; label: string; icon: JSX.Element }[] = [
+    { id: 'DARK', label: 'Dark', icon: <Moon className="w-3.5 h-3.5" /> },
+    { id: 'SATELLITE', label: 'Sat', icon: <Satellite className="w-3.5 h-3.5" /> },
+    { id: 'DAYLIGHT', label: 'Day', icon: <Sun className="w-3.5 h-3.5" /> },
+  ];
 
-    return (
-      <div className="pointer-events-auto flex items-center gap-1 p-1 rounded-xl bg-slate-950/80 border border-white/10 backdrop-blur-md shadow-xl">
-        {styles.map((s) => {
-          const active = settings.mapStyle === s.id;
-          return (
-            <button
-              key={s.id}
-              type="button"
-              onClick={() => handleUpdateSettings({ mapStyle: s.id })}
-              className="flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium transition-all border"
-              style={{
-                backgroundColor: active ? accent.softBg : 'transparent',
-                borderColor: active ? accent.border : 'transparent',
-                color: active ? accent.text : '#94a3b8',
-              }}
-              title={`${s.label} map style`}
-            >
-              {s.icon}
-              {!compact && <span>{s.label}</span>}
-            </button>
-          );
-        })}
-
-        <div className="w-px h-4 bg-white/10 mx-0.5" />
-
-        <button
-          type="button"
-          onClick={() => handleUpdateSettings({ enable3D: !settings.enable3D })}
-          className="flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-semibold transition-all border"
-          style={{
-            backgroundColor: settings.enable3D ? accent.softBg : 'transparent',
-            borderColor: settings.enable3D ? accent.border : 'transparent',
-            color: settings.enable3D ? accent.text : '#94a3b8',
-          }}
-          title="Toggle 3D Extruded Buildings"
-        >
-          <Box className="w-3 h-3" />
-          <span>3D</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setIsSettingsOpen(true)}
-          className="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-white/10 transition-colors"
-          title="Appearance & Settings"
-          aria-label="Open Settings"
-        >
-          <Settings className="w-3.5 h-3.5" />
-        </button>
-      </div>
-    );
-  };
-
-  const renderCameraControls = (compact = false) => {
-    if (!activeTrip) return null;
-    const items: { id: CameraMode; label: string; title: string; icon: JSX.Element }[] = [
-      {
-        id: 'CHASE',
-        label: 'Chase',
-        title: 'Cinematic Chase camera',
-        icon: <Navigation2 className="w-3.5 h-3.5" />,
-      },
-      {
-        id: 'DRONE',
-        label: 'Drone',
-        title: 'Drone Chase (56° spline camera)',
-        icon: <Video className="w-3.5 h-3.5" />,
-      },
-      {
-        id: 'OVERVIEW',
-        label: 'Overview',
-        title: 'Frame entire trip',
-        icon: <Eye className="w-3.5 h-3.5" />,
-      },
-      {
-        id: 'FREE',
-        label: 'Free',
-        title: 'Free manual pan/zoom/tilt',
-        icon: <Hand className="w-3.5 h-3.5" />,
-      },
-    ];
-
-    return (
-      <div className="pointer-events-auto flex flex-wrap items-center gap-1.5">
-        <div className="flex items-center p-1 rounded-xl bg-slate-950/80 border border-white/10 backdrop-blur-md shadow-xl">
-          {items.map((item) => {
-            const active = cameraMode === item.id;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => handleSelectCameraMode(item.id)}
-                className="flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium transition-all border"
-                style={{
-                  backgroundColor: active ? accent.softBg : 'transparent',
-                  borderColor: active ? accent.border : 'transparent',
-                  color: active ? accent.text : '#94a3b8',
-                }}
-                title={item.title}
-              >
-                {item.icon}
-                {!compact && <span>{item.label}</span>}
-              </button>
-            );
-          })}
-        </div>
-
-        {cameraMode === 'FREE' && (
-          <button
-            type="button"
-            onClick={() => handleSelectCameraMode('CHASE')}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl font-semibold text-[11px] shadow-lg transition-all"
-            style={{
-              backgroundColor: accent.buttonBg,
-              color: accent.buttonText,
-              boxShadow: `0 6px 18px ${accent.glow}`,
-            }}
-          >
-            <Crosshair className="w-3.5 h-3.5" />
-            <span>Re-center</span>
-          </button>
-        )}
-
-        {showHeatmap && (
-          <button
-            type="button"
-            onClick={() => setShowHeatmap(false)}
-            className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-rose-500/20 border border-rose-400/45 text-rose-200 hover:bg-rose-500/30 text-[11px] font-semibold backdrop-blur-md shadow-lg transition-all"
-            title="Turn off All-Time Heatmap"
-          >
-            <Flame className="w-3.5 h-3.5 text-rose-400" />
-            <span>Heatmap</span>
-            <X className="w-3 h-3" />
-          </button>
-        )}
-      </div>
-    );
-  };
+  const cameraItems: {
+    id: CameraMode;
+    label: string;
+    title: string;
+    icon: JSX.Element;
+  }[] = [
+    {
+      id: 'CHASE',
+      label: 'Chase',
+      title: 'Cinematic Chase camera',
+      icon: <Navigation2 className="w-3.5 h-3.5" />,
+    },
+    {
+      id: 'DRONE',
+      label: 'Drone',
+      title: 'Drone Chase (56° spline camera)',
+      icon: <Video className="w-3.5 h-3.5" />,
+    },
+    {
+      id: 'OVERVIEW',
+      label: 'Overview',
+      title: 'Frame entire route',
+      icon: <Eye className="w-3.5 h-3.5" />,
+    },
+    {
+      id: 'FREE',
+      label: 'Free',
+      title: 'Manual pan, zoom, and tilt',
+      icon: <Hand className="w-3.5 h-3.5" />,
+    },
+  ];
 
   return (
-    <main className="relative w-screen h-screen overflow-hidden bg-[#070A0F] text-slate-100">
+    <main className="relative w-screen h-screen overflow-hidden bg-[#0A0D14] text-slate-100">
       {/* Full-Viewport WebGL Map */}
       <MapCanvas
         controller={controller}
@@ -571,6 +571,7 @@ export default function App() {
         heatmapGeoJson={heatmapGeoJson}
         nicknames={nicknames}
         geocodeCache={geocodeCache}
+        mapInstanceRef={mapInstanceRef}
         onStagingChange={setStaging}
         onMapError={handleMapError}
       />
@@ -578,11 +579,11 @@ export default function App() {
       {/* Corridor Pre-Staging Progress Overlay */}
       {staging.active && (
         <div
-          className={`fixed inset-x-0 top-24 sm:top-20 z-30 flex justify-center px-4 pointer-events-none transition-all duration-200 ${
+          className={`fixed inset-x-0 top-20 z-30 flex justify-center px-4 pointer-events-none transition-all duration-200 ${
             sidebarOpen ? 'md:pl-[352px]' : ''
           }`}
         >
-          <div className="w-full max-w-xs rounded-2xl bg-slate-950/85 border border-white/15 backdrop-blur-md shadow-2xl px-4 py-3 space-y-2">
+          <div className="w-full max-w-xs rounded-xl instrument-surface-strong px-3.5 py-2.5 space-y-2">
             <div className="flex items-center justify-between gap-3 text-xs">
               <span className="flex items-center gap-2 font-medium text-slate-100 truncate">
                 <Loader2
@@ -594,19 +595,18 @@ export default function App() {
                 </span>
               </span>
               <span
-                className="font-mono tabular-nums text-[11px] font-semibold shrink-0"
+                className="font-mono tabular-nums text-[11px] font-medium shrink-0"
                 style={{ color: accent.text }}
               >
                 {Math.round(staging.percent)}%
               </span>
             </div>
-            <div className="h-1.5 w-full rounded-full bg-white/10 overflow-hidden">
+            <div className="h-1 w-full rounded-full bg-white/[0.08] overflow-hidden">
               <div
                 className="h-full rounded-full transition-all duration-200 ease-out"
                 style={{
                   width: `${Math.max(4, Math.min(100, staging.percent))}%`,
-                  background: `linear-gradient(90deg, ${accent.primary}, ${accent.buttonBg})`,
-                  boxShadow: `0 0 12px ${accent.glow}`,
+                  backgroundColor: accent.primary,
                 }}
               />
             </div>
@@ -614,56 +614,162 @@ export default function App() {
         </div>
       )}
 
-      {/* Unified Top Safe-Area HUD Bar */}
+      {/* Unified Top Safe-Area Instrument Strip */}
       <header className="fixed top-0 left-0 right-0 z-20 px-3 pointer-events-none safe-top-hud">
-        <div className="pt-2 flex items-start justify-between gap-2">
-          {/* Left: Trips Button (when collapsed) + Mobile Style/3D/Camera Controls */}
-          <div className="flex flex-col items-start gap-1.5 shrink-0">
-            {!sidebarOpen && (
+        <div
+          className={`pt-2 flex flex-wrap items-start justify-between gap-2 transition-all ${
+            sidebarOpen ? 'md:pl-[344px]' : ''
+          }`}
+        >
+          {/* Left: Single Unified Instrument Control Bar */}
+          <div className="pointer-events-auto flex flex-wrap items-center gap-1.5 max-w-full">
+            <div className="instrument-surface rounded-xl p-1 flex items-center gap-0.5 max-w-full overflow-x-auto">
+              {/* Trips Drawer Trigger (when collapsed) */}
+              {!sidebarOpen && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setSidebarOpen(true)}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-100 hover:bg-white/[0.07] active:scale-[0.98] transition-all shrink-0"
+                    title="Open Trip Explorer"
+                  >
+                    <Compass
+                      className="w-3.5 h-3.5 shrink-0"
+                      style={{ color: accent.primary }}
+                    />
+                    <span>Trips</span>
+                    {totalBadgeCount > 0 && (
+                      <span
+                        className="px-1.5 py-0.5 rounded-md text-[10px] font-mono tabular-nums"
+                        style={{
+                          backgroundColor: accent.softBg,
+                          color: accent.text,
+                        }}
+                      >
+                        {totalBadgeCount}
+                      </span>
+                    )}
+                    <ChevronRight className="w-3 h-3 text-slate-500 shrink-0" />
+                  </button>
+                  <div className="w-px h-4 bg-white/[0.08] mx-0.5 shrink-0" />
+                </>
+              )}
+
+              {/* Map Style Selector */}
+              {mapStyles.map((s) => {
+                const active = settings.mapStyle === s.id;
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => handleUpdateSettings({ mapStyle: s.id })}
+                    className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium active:scale-[0.98] transition-all border shrink-0"
+                    style={{
+                      backgroundColor: active ? accent.softBg : 'transparent',
+                      borderColor: active ? accent.border : 'transparent',
+                      color: active ? accent.text : '#94a3b8',
+                    }}
+                    title={`${s.label} map style`}
+                  >
+                    {s.icon}
+                    <span className="hidden xl:inline">{s.label}</span>
+                  </button>
+                );
+              })}
+
+              <div className="w-px h-4 bg-white/[0.08] mx-0.5 shrink-0" />
+
+              {/* 3D Buildings Toggle */}
               <button
                 type="button"
-                onClick={() => setSidebarOpen(true)}
-                className="pointer-events-auto flex items-center gap-1.5 sm:gap-2 px-3 py-2 rounded-xl bg-slate-950/80 border border-white/15 backdrop-blur-md text-slate-100 hover:bg-slate-900/90 shadow-xl transition-all text-xs font-medium"
-                title="Expand Trip Explorer"
+                onClick={() =>
+                  handleUpdateSettings({ enable3D: !settings.enable3D })
+                }
+                className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium active:scale-[0.98] transition-all border shrink-0"
+                style={{
+                  backgroundColor: settings.enable3D ? accent.softBg : 'transparent',
+                  borderColor: settings.enable3D ? accent.border : 'transparent',
+                  color: settings.enable3D ? accent.text : '#94a3b8',
+                }}
+                title="Toggle 3D Extruded Buildings"
               >
-                <Compass
-                  className="w-4 h-4 shrink-0"
-                  style={{ color: accent.primary }}
-                />
-                <span>Trips</span>
-                {totalBadgeCount > 0 && (
-                  <span
-                    className="px-1.5 py-0.5 rounded-md text-[10px] font-mono tabular-nums"
-                    style={{
-                      backgroundColor: accent.softBg,
-                      color: accent.text,
-                    }}
-                  >
-                    {totalBadgeCount}
-                  </span>
-                )}
-                <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <Box className="w-3.5 h-3.5" />
+                <span>3D</span>
+              </button>
+
+              {/* Camera Mode Selector (when trip loaded) */}
+              {activeTrip && (
+                <>
+                  <div className="w-px h-4 bg-white/[0.08] mx-0.5 shrink-0" />
+                  {cameraItems.map((item) => {
+                    const active = cameraMode === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => handleSelectCameraMode(item.id)}
+                        className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium active:scale-[0.98] transition-all border shrink-0"
+                        style={{
+                          backgroundColor: active ? accent.softBg : 'transparent',
+                          borderColor: active ? accent.border : 'transparent',
+                          color: active ? accent.text : '#94a3b8',
+                        }}
+                        title={item.title}
+                      >
+                        {item.icon}
+                        <span className="hidden lg:inline">{item.label}</span>
+                      </button>
+                    );
+                  })}
+                </>
+              )}
+
+              <div className="w-px h-4 bg-white/[0.08] mx-0.5 shrink-0" />
+
+              {/* Settings Trigger */}
+              <button
+                type="button"
+                onClick={() => setIsSettingsOpen(true)}
+                className="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-white/[0.07] active:scale-[0.98] transition-all shrink-0"
+                title="Settings"
+                aria-label="Open Settings"
+              >
+                <Settings className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Contextual Re-center & Heatmap Chips */}
+            {activeTrip && cameraMode === 'FREE' && (
+              <button
+                type="button"
+                onClick={() => handleSelectCameraMode('CHASE')}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl font-medium text-xs active:scale-[0.98] transition-all"
+                style={{
+                  backgroundColor: accent.buttonBg,
+                  color: accent.buttonText,
+                }}
+              >
+                <Crosshair className="w-3.5 h-3.5" />
+                <span>Re-center</span>
               </button>
             )}
 
-            <div className="lg:hidden flex flex-col items-start gap-1.5">
-              {renderMapStylePill(true)}
-              {renderCameraControls(true)}
-            </div>
+            {showHeatmap && (
+              <button
+                type="button"
+                onClick={() => setShowHeatmap(false)}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl instrument-surface border-rose-400/35 text-rose-200 hover:bg-rose-500/20 text-xs font-medium active:scale-[0.98] transition-all"
+                title="Disable all-time heatmap"
+              >
+                <Flame className="w-3.5 h-3.5 text-rose-400" />
+                <span>Heatmap</span>
+                <X className="w-3 h-3" />
+              </button>
+            )}
           </div>
 
-          {/* Center: Desktop Map Style + 3D + Camera Controls */}
-          <div
-            className={`hidden lg:flex flex-wrap items-center justify-center gap-2 flex-1 min-w-0 ${
-              sidebarOpen ? 'pl-[348px]' : ''
-            }`}
-          >
-            {renderMapStylePill(false)}
-            {renderCameraControls(false)}
-          </div>
-
-          {/* Right: Telemetry HUD */}
-          <div className="flex flex-col items-end shrink min-w-0">
+          {/* Right: Compact Low-Profile Telemetry Bar */}
+          <div className="ml-auto shrink min-w-0">
             <TelemetryHUD
               frame={frame}
               units={settings.units}
@@ -677,42 +783,42 @@ export default function App() {
       </header>
 
       {/* Empty State Welcome Card */}
-      {!activeTrip && (
-        <div className="fixed inset-0 z-10 flex items-center justify-center pointer-events-none px-4 sm:pl-[360px]">
-          <div className="pointer-events-auto max-w-md w-full rounded-2xl bg-slate-950/80 border border-white/15 backdrop-blur-md shadow-2xl p-6 text-center space-y-4">
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-400/30 text-[11px] font-medium text-emerald-300">
-              <ShieldCheck className="w-3.5 h-3.5" />
-              <span>Privacy-First · Zero Data Leaves Your Device</span>
+      {!activeTrip && !isRestoringCache && (
+        <div className="fixed inset-0 z-10 flex items-center justify-center pointer-events-none px-4 md:pl-[360px]">
+          <div className="pointer-events-auto max-w-md w-full rounded-xl instrument-surface-strong p-6 text-center space-y-4">
+            <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-lg instrument-inset text-[11px] font-medium text-slate-300">
+              <span
+                className="w-1.5 h-1.5 rounded-full"
+                style={{ backgroundColor: accent.primary }}
+              />
+              <span>ChronoMap {APP_VERSION} · Local-only engine</span>
             </div>
 
             <div className="space-y-1.5">
-              <h2 className="text-xl font-semibold tracking-tight text-white">
-                Replay Your Google Timeline in 3D at 60fps
+              <h2 className="text-lg font-semibold tracking-tight text-white">
+                Replay your Google Timeline in 60fps
               </h2>
-              <p className="text-xs text-slate-300 leading-relaxed">
-                Drop your{' '}
-                <code style={{ color: accent.primary }}>Timeline.json</code>,{' '}
-                <code style={{ color: accent.primary }}>
-                  Semantic Location History
-                </code>
-                , or <code style={{ color: accent.primary }}>Records.json</code>{' '}
-                file—parsed locally inside a Web Worker.
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Import{' '}
+                <code className="text-slate-200">Timeline.json</code>,{' '}
+                <code className="text-slate-200">Semantic Location History</code>, or{' '}
+                <code className="text-slate-200">Records.json</code>. Parsed inside a
+                local Web Worker and cached in IndexedDB for instant reopen.
               </p>
             </div>
 
-            <div className="flex flex-col sm:flex-row items-center justify-center gap-2.5 pt-1">
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-2 pt-1">
               <button
                 type="button"
                 onClick={handleLoadSample}
                 disabled={isParsing}
-                className="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-xs shadow-lg transition-all disabled:opacity-50"
+                className="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-xs active:scale-[0.98] transition-all hover:brightness-110 disabled:opacity-50"
                 style={{
                   backgroundColor: accent.buttonBg,
                   color: accent.buttonText,
-                  boxShadow: `0 6px 22px ${accent.glow}`,
                 }}
               >
-                <Sparkles className="w-4 h-4" />
+                <Sparkles className="w-3.5 h-3.5" />
                 <span>Load Sample Journey</span>
               </button>
 
@@ -720,10 +826,10 @@ export default function App() {
                 type="button"
                 onClick={() => fileDropInputRef.current?.click()}
                 disabled={isParsing}
-                className="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-white/[0.06] hover:bg-white/10 border border-white/15 text-slate-100 font-medium text-xs transition-all disabled:opacity-50"
+                className="w-full sm:w-auto flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg instrument-inset hover:bg-white/[0.07] text-slate-100 font-medium text-xs active:scale-[0.98] transition-all disabled:opacity-50"
               >
                 <UploadCloud
-                  className="w-4 h-4"
+                  className="w-3.5 h-3.5"
                   style={{ color: accent.primary }}
                 />
                 <span>Import .json File</span>
@@ -767,6 +873,10 @@ export default function App() {
         accentTheme={settings.accentTheme}
         showHeatmap={showHeatmap}
         onOpenStatsModal={() => setIsStatsOpen(true)}
+        starredIds={starredIds}
+        onToggleStar={handleToggleStar}
+        cachedFileName={cachedFileName}
+        isRestoringCache={isRestoringCache}
       />
 
       {/* Bottom Media Playback Dock */}
@@ -781,9 +891,11 @@ export default function App() {
         onStepSegment={handleStepSegment}
         onSelectSpeed={handleSelectSpeed}
         onToggleLoop={handleToggleLoop}
+        onExportPostcard={() => void handleExportPostcard()}
+        isExportingPostcard={isExportingPostcard}
       />
 
-      {/* Appearance & Settings Modal */}
+      {/* Settings Modal */}
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}

@@ -5,14 +5,15 @@ import {
   CalendarDays,
   ChevronLeft,
   Compass,
-  FileJson,
+  Database,
+  FileUp,
   Flame,
   Loader2,
   MapPin,
   Route,
   Search,
-  ShieldCheck,
   Sparkles,
+  Star,
   UploadCloud,
   X,
 } from 'lucide-react';
@@ -31,10 +32,12 @@ import {
   formatYearMonthLabel,
 } from '../utils/format';
 import { MODE_COLORS, MODE_LABELS } from '../utils/geo';
-import { ACCENT_THEMES } from '../utils/settings';
+import { ACCENT_THEMES, APP_VERSION } from '../utils/settings';
 import { ModeIcon } from './ModeIcon';
 
 const PAGE_SIZE = 80;
+
+type DiscoveryFilter = 'ALL' | 'STARRED' | 'ON_THIS_DAY' | 'LONGEST';
 
 interface TripSidebarProps {
   isOpen: boolean;
@@ -55,6 +58,17 @@ interface TripSidebarProps {
   accentTheme: AccentThemeId;
   showHeatmap: boolean;
   onOpenStatsModal: () => void;
+  starredIds: string[];
+  onToggleStar: (id: string) => void;
+  cachedFileName: string | null;
+  isRestoringCache: boolean;
+}
+
+function getTodayMonthDay(): string {
+  const now = new Date();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  return `${mm}-${dd}`;
 }
 
 export function TripSidebar({
@@ -76,25 +90,49 @@ export function TripSidebar({
   accentTheme,
   showHeatmap,
   onOpenStatsModal,
+  starredIds,
+  onToggleStar,
+  cachedFileName,
+  isRestoringCache,
 }: TripSidebarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [discoveryFilter, setDiscoveryFilter] = useState<DiscoveryFilter>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [monthFilter, setMonthFilter] = useState('');
   const [dateFilter, setDateFilter] = useState('');
   const [visibleLimit, setVisibleLimit] = useState(PAGE_SIZE);
 
   const accent = ACCENT_THEMES[accentTheme];
+  const todayMonthDay = useMemo(() => getTodayMonthDay(), []);
+  const starredSet = useMemo(() => new Set(starredIds), [starredIds]);
 
   const activeList: TripSummary[] = useMemo(() => {
     if (!index) return [];
     return viewMode === 'DAY' ? index.days : index.journeys;
   }, [index, viewMode]);
 
+  const discoveryCounts = useMemo(() => {
+    let starred = 0;
+    let onThisDay = 0;
+    for (const item of activeList) {
+      if (starredSet.has(item.id)) starred++;
+      if (item.dateKey.slice(5) === todayMonthDay) onThisDay++;
+    }
+    return { starred, onThisDay };
+  }, [activeList, starredSet, todayMonthDay]);
+
   const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
 
-    return activeList.filter((item) => {
+    const matched = activeList.filter((item) => {
+      if (discoveryFilter === 'STARRED' && !starredSet.has(item.id)) return false;
+      if (
+        discoveryFilter === 'ON_THIS_DAY' &&
+        item.dateKey.slice(5) !== todayMonthDay
+      ) {
+        return false;
+      }
       if (monthFilter && item.yearMonth !== monthFilter) return false;
       if (dateFilter && item.dateKey !== dateFilter) return false;
       if (!q) return true;
@@ -109,7 +147,20 @@ export function TripSidebar({
       }
       return false;
     });
-  }, [activeList, monthFilter, dateFilter, searchQuery]);
+
+    if (discoveryFilter === 'LONGEST') {
+      return [...matched].sort((a, b) => b.distanceM - a.distanceM);
+    }
+    return matched;
+  }, [
+    activeList,
+    discoveryFilter,
+    starredSet,
+    todayMonthDay,
+    monthFilter,
+    dateFilter,
+    searchQuery,
+  ]);
 
   const visibleItems = useMemo(
     () => filteredItems.slice(0, visibleLimit),
@@ -124,7 +175,7 @@ export function TripSidebar({
     }
   };
 
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+  const handleDrop = (e: React.DragEvent<HTMLElement>) => {
     e.preventDefault();
     e.stopPropagation();
     setIsDragging(false);
@@ -139,14 +190,48 @@ export function TripSidebar({
   }
 
   const stats = index?.stats ?? null;
+  const filterTabs: { id: DiscoveryFilter; label: string; count?: number }[] = [
+    { id: 'ALL', label: 'All' },
+    {
+      id: 'STARRED',
+      label: 'Starred',
+      count: discoveryCounts.starred > 0 ? discoveryCounts.starred : undefined,
+    },
+    {
+      id: 'ON_THIS_DAY',
+      label: 'On This Day',
+      count: discoveryCounts.onThisDay > 0 ? discoveryCounts.onThisDay : undefined,
+    },
+    { id: 'LONGEST', label: 'Longest' },
+  ];
 
   return (
-    <aside className="fixed safe-top-drawer left-3 bottom-3 z-30 w-[min(90vw,336px)] flex flex-col rounded-2xl bg-slate-950/88 border border-white/10 backdrop-blur-md shadow-2xl overflow-hidden">
+    <aside
+      onDragOver={(e) => {
+        e.preventDefault();
+        setIsDragging(true);
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target) setIsDragging(false);
+      }}
+      onDrop={handleDrop}
+      className={`fixed safe-top-drawer left-3 bottom-3 z-30 w-[min(90vw,336px)] flex flex-col rounded-xl instrument-surface-strong overflow-hidden transition-colors ${
+        isDragging ? 'ring-1 ring-cyan-400/60' : ''
+      }`}
+    >
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".json,application/json"
+        onChange={handleFileChange}
+        className="hidden"
+      />
+
       {/* Header */}
-      <div className="px-4 pt-3.5 pb-3 border-b border-white/10 flex items-center justify-between gap-2">
+      <div className="px-3.5 py-3 border-b border-white/[0.08] flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
           <div
-            className="w-8 h-8 rounded-xl border flex items-center justify-center shrink-0"
+            className="w-7 h-7 rounded-lg border flex items-center justify-center shrink-0"
             style={{
               backgroundColor: accent.softBg,
               borderColor: accent.border,
@@ -158,16 +243,15 @@ export function TripSidebar({
             <h1 className="text-sm font-semibold tracking-tight text-white truncate">
               ChronoMap
             </h1>
-            <div className="flex items-center gap-1 text-[10px] text-emerald-300/90">
-              <ShieldCheck className="w-3 h-3 shrink-0" />
-              <span className="truncate">100% Local · In-Browser</span>
-            </div>
+            <p className="text-[11px] text-slate-400 truncate">
+              {cachedFileName ? cachedFileName : 'Private on-device replay'}
+            </p>
           </div>
         </div>
         <button
           type="button"
           onClick={onToggleOpen}
-          className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
+          className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.07] active:scale-[0.98] transition-all"
           aria-label="Collapse trip explorer"
           title="Collapse sidebar"
         >
@@ -175,49 +259,25 @@ export function TripSidebar({
         </button>
       </div>
 
-      {/* Import, Sample & Stats Controls */}
-      <div className="p-3 space-y-2 border-b border-white/10">
-        <div
-          onDragOver={(e) => {
-            e.preventDefault();
-            setIsDragging(true);
-          }}
-          onDragLeave={() => setIsDragging(false)}
-          onDrop={handleDrop}
-          onClick={() => !isParsing && fileInputRef.current?.click()}
-          role="button"
-          tabIndex={0}
-          onKeyDown={(e) => {
-            if ((e.key === 'Enter' || e.key === ' ') && !isParsing) {
-              e.preventDefault();
-              fileInputRef.current?.click();
-            }
-          }}
-          className={`relative rounded-xl border border-dashed px-3 py-2.5 transition-all cursor-pointer select-none ${
-            isDragging
-              ? 'border-cyan-400 bg-cyan-500/15'
-              : 'border-white/15 bg-white/[0.03] hover:bg-white/[0.06] hover:border-white/30'
-          }`}
-        >
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".json,application/json"
-            onChange={handleFileChange}
-            className="hidden"
-          />
-
-          {isParsing ? (
-            <div className="space-y-2" onClick={(e) => e.stopPropagation()}>
-              <div className="flex items-center justify-between text-[11px]">
-                <span
-                  className="font-medium truncate pr-2"
-                  style={{ color: accent.text }}
-                >
-                  {parseStage || 'Parsing file...'}
+      {/* Import / Action Strip */}
+      <div className="p-3 space-y-2 border-b border-white/[0.08]">
+        {isParsing || isRestoringCache ? (
+          <div className="rounded-lg instrument-inset px-3 py-2.5 space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span
+                className="font-medium truncate pr-2 flex items-center gap-1.5"
+                style={{ color: accent.text }}
+              >
+                <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                <span className="truncate">
+                  {isRestoringCache
+                    ? 'Restoring cached timeline...'
+                    : parseStage || 'Parsing file...'}
                 </span>
+              </span>
+              {!isRestoringCache && (
                 <div className="flex items-center gap-2 shrink-0">
-                  <span className="font-mono text-slate-300 tabular-nums">
+                  <span className="font-mono text-[11px] text-slate-300 tabular-nums">
                     {Math.round(parseProgress)}%
                   </span>
                   <button
@@ -229,41 +289,81 @@ export function TripSidebar({
                     <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
-              </div>
-              <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
-                <div
-                  className="h-full transition-all duration-150"
-                  style={{
-                    width: `${Math.max(4, parseProgress)}%`,
-                    backgroundColor: accent.primary,
-                  }}
-                />
-              </div>
+              )}
             </div>
-          ) : (
+            <div className="h-1 w-full rounded-full bg-white/10 overflow-hidden">
+              <div
+                className="h-full transition-all duration-150"
+                style={{
+                  width: `${Math.max(8, isRestoringCache ? 45 : parseProgress)}%`,
+                  backgroundColor: accent.primary,
+                }}
+              />
+            </div>
+          </div>
+        ) : !index ? (
+          <div
+            onClick={() => fileInputRef.current?.click()}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                fileInputRef.current?.click();
+              }
+            }}
+            className="rounded-lg border border-dashed border-white/15 bg-white/[0.02] hover:bg-white/[0.05] hover:border-white/25 px-3 py-2.5 transition-all cursor-pointer select-none active:scale-[0.98]"
+          >
             <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg bg-slate-900/90 border border-white/10 flex items-center justify-center shrink-0">
+              <div className="w-8 h-8 rounded-lg instrument-inset flex items-center justify-center shrink-0">
                 <UploadCloud className="w-4 h-4" style={{ color: accent.primary }} />
               </div>
               <div className="min-w-0">
-                <p className="text-xs font-medium text-slate-200">
-                  Drop Google Timeline{' '}
+                <p className="text-xs font-medium text-slate-100">
+                  Import Google Timeline{' '}
                   <span style={{ color: accent.primary }}>.json</span>
                 </p>
-                <p className="text-[10px] text-slate-400 truncate">
-                  Timeline.json, Semantic History, or Records.json
+                <p className="text-[11px] text-slate-400 truncate">
+                  Timeline.json, Semantic History, or Records
                 </p>
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg instrument-inset hover:bg-white/[0.07] text-xs font-medium text-slate-100 active:scale-[0.98] transition-all"
+            >
+              <FileUp className="w-3.5 h-3.5 shrink-0" style={{ color: accent.primary }} />
+              <span className="truncate">Load New JSON</span>
+            </button>
 
-        <div className={`grid gap-1.5 ${index ? 'grid-cols-2' : 'grid-cols-1'}`}>
+            <button
+              type="button"
+              onClick={onOpenStatsModal}
+              className="flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg instrument-inset hover:bg-white/[0.07] text-xs font-medium text-slate-100 active:scale-[0.98] transition-all"
+            >
+              {showHeatmap ? (
+                <Flame className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+              ) : (
+                <BarChart3
+                  className="w-3.5 h-3.5 shrink-0"
+                  style={{ color: accent.primary }}
+                />
+              )}
+              <span className="truncate">Stats &amp; Map</span>
+            </button>
+          </div>
+        )}
+
+        {!index && (
           <button
             type="button"
             onClick={onLoadSample}
-            disabled={isParsing}
-            className="w-full flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-xl border text-xs font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={isParsing || isRestoringCache}
+            className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-medium active:scale-[0.98] transition-all disabled:opacity-50"
             style={{
               backgroundColor: accent.softBg,
               borderColor: accent.border,
@@ -271,68 +371,46 @@ export function TripSidebar({
             }}
           >
             <Sparkles className="w-3.5 h-3.5 shrink-0" />
-            <span className="truncate">
-              {index ? 'Sample Data' : 'Load Sample Journey'}
-            </span>
+            <span>Load Sample Journey</span>
           </button>
-
-          {index && (
-            <button
-              type="button"
-              onClick={onOpenStatsModal}
-              className="w-full flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-xl border text-xs font-semibold transition-all bg-white/[0.04] hover:bg-white/10 border-white/15 text-slate-100"
-            >
-              {showHeatmap ? (
-                <Flame className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-              ) : (
-                <BarChart3 className="w-3.5 h-3.5 shrink-0" style={{ color: accent.primary }} />
-              )}
-              <span className="truncate">Stats &amp; Heatmap</span>
-            </button>
-          )}
-        </div>
+        )}
 
         {stats && (
-          <div className="grid grid-cols-3 gap-1.5 pt-0.5">
-            <div className="px-2 py-1.5 rounded-lg bg-white/[0.03] border border-white/5">
-              <div className="text-[9px] uppercase tracking-wider text-slate-400">
-                Distance
-              </div>
-              <div className="text-[11px] font-semibold text-slate-200 tabular-nums truncate">
+          <div className="grid grid-cols-3 gap-1.5">
+            <div className="px-2 py-1.5 rounded-lg instrument-inset">
+              <div className="text-[10px] text-slate-400">Distance</div>
+              <div className="text-xs font-mono font-medium text-slate-100 tabular-nums truncate">
                 {formatDistance(stats.totalDistanceM, units)}
               </div>
             </div>
-            <div className="px-2 py-1.5 rounded-lg bg-white/[0.03] border border-white/5">
-              <div className="text-[9px] uppercase tracking-wider text-slate-400">
-                Waypoints
-              </div>
-              <div className="text-[11px] font-semibold text-slate-200 tabular-nums truncate">
+            <div className="px-2 py-1.5 rounded-lg instrument-inset">
+              <div className="text-[10px] text-slate-400">Points</div>
+              <div className="text-xs font-mono font-medium text-slate-100 tabular-nums truncate">
                 {stats.totalWaypoints.toLocaleString()}
               </div>
             </div>
-            <div className="px-2 py-1.5 rounded-lg bg-white/[0.03] border border-white/5">
-              <div className="text-[9px] uppercase tracking-wider text-slate-400">
-                Spikes Cut
-              </div>
-              <div className="text-[11px] font-semibold text-slate-200 tabular-nums truncate">
-                {stats.filteredSpikes}
+            <div className="px-2 py-1.5 rounded-lg instrument-inset">
+              <div className="text-[10px] text-slate-400">Format</div>
+              <div className="text-xs font-medium text-slate-200 truncate">
+                {formatSchemaName(stats.schema).split(' ')[0]}
               </div>
             </div>
           </div>
         )}
       </div>
 
-      {/* View Mode Toggle + Year/Month + Date + Search Filters */}
+      {/* View Mode + Smart Discovery Tabs + Search/Date Filters */}
       {index && (
-        <div className="px-3 py-2.5 border-b border-white/10 space-y-2">
-          <div className="grid grid-cols-2 p-0.5 rounded-xl bg-slate-900/90 border border-white/10">
+        <div className="px-3 py-2.5 border-b border-white/[0.08] space-y-2">
+          {/* By Day / Journeys Switcher */}
+          <div className="grid grid-cols-2 p-0.5 rounded-lg instrument-inset">
             <button
               type="button"
               onClick={() => {
                 setVisibleLimit(PAGE_SIZE);
                 onViewModeChange('DAY');
               }}
-              className="flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-[11px] font-medium transition-all border"
+              className="flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-[11px] font-medium active:scale-[0.98] transition-all border"
               style={{
                 backgroundColor: viewMode === 'DAY' ? accent.softBg : 'transparent',
                 borderColor: viewMode === 'DAY' ? accent.border : 'transparent',
@@ -352,7 +430,7 @@ export function TripSidebar({
                 setVisibleLimit(PAGE_SIZE);
                 onViewModeChange('JOURNEY');
               }}
-              className="flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-[11px] font-medium transition-all border"
+              className="flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-[11px] font-medium active:scale-[0.98] transition-all border"
               style={{
                 backgroundColor:
                   viewMode === 'JOURNEY' ? accent.softBg : 'transparent',
@@ -368,6 +446,41 @@ export function TripSidebar({
             </button>
           </div>
 
+          {/* Quick Smart Discovery Tabs */}
+          <div className="flex items-center gap-1 overflow-x-auto pb-0.5 no-scrollbar">
+            {filterTabs.map((tab) => {
+              const active = discoveryFilter === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => {
+                    setDiscoveryFilter(tab.id);
+                    setVisibleLimit(PAGE_SIZE);
+                  }}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[11px] font-medium whitespace-nowrap border active:scale-[0.98] transition-all shrink-0"
+                  style={{
+                    backgroundColor: active
+                      ? accent.softBg
+                      : 'rgba(255,255,255,0.03)',
+                    borderColor: active
+                      ? accent.border
+                      : 'rgba(255,255,255,0.07)',
+                    color: active ? accent.text : '#94a3b8',
+                  }}
+                >
+                  <span>{tab.label}</span>
+                  {tab.count !== undefined && (
+                    <span className="font-mono text-[10px] tabular-nums opacity-80">
+                      {tab.count}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Search */}
           <div className="relative">
             <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
@@ -378,7 +491,7 @@ export function TripSidebar({
                 setVisibleLimit(PAGE_SIZE);
               }}
               placeholder="Search trips, places, modes..."
-              className="w-full pl-8 pr-7 py-1.5 rounded-lg bg-slate-900/80 border border-white/10 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-white/30"
+              className="w-full pl-8 pr-7 py-1.5 rounded-lg bg-white/[0.03] border border-white/[0.08] text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-white/25"
             />
             {searchQuery && (
               <button
@@ -392,6 +505,7 @@ export function TripSidebar({
             )}
           </div>
 
+          {/* Month & Date Filters */}
           <div className="grid grid-cols-2 gap-1.5">
             <select
               value={monthFilter}
@@ -401,9 +515,9 @@ export function TripSidebar({
                 setVisibleLimit(PAGE_SIZE);
               }}
               aria-label="Filter by month"
-              className="w-full px-2 py-1 rounded-lg bg-slate-900/80 border border-white/10 text-[11px] text-slate-200 focus:outline-none focus:border-white/30 [color-scheme:dark]"
+              className="w-full px-2 py-1 rounded-lg bg-white/[0.03] border border-white/[0.08] text-[11px] text-slate-200 focus:outline-none focus:border-white/25 [color-scheme:dark]"
             >
-              <option value="">All Months ({index.yearMonths.length})</option>
+              <option value="">All months ({index.yearMonths.length})</option>
               {index.yearMonths.map((ym) => (
                 <option key={ym} value={ym}>
                   {formatYearMonthLabel(ym)} ({ym})
@@ -423,64 +537,47 @@ export function TripSidebar({
                   setVisibleLimit(PAGE_SIZE);
                 }}
                 aria-label="Filter by date"
-                className="w-full pl-6 pr-1 py-1 rounded-lg bg-slate-900/80 border border-white/10 text-[11px] text-slate-200 focus:outline-none focus:border-white/30 [color-scheme:dark]"
+                className="w-full pl-6 pr-1 py-1 rounded-lg bg-white/[0.03] border border-white/[0.08] text-[11px] text-slate-200 focus:outline-none focus:border-white/25 [color-scheme:dark]"
               />
             </div>
           </div>
-
-          {stats && (
-            <div className="flex items-center justify-between text-[10px] text-slate-400 px-0.5">
-              <span className="flex items-center gap-1 truncate">
-                <FileJson
-                  className="w-3 h-3 shrink-0"
-                  style={{ color: accent.primary }}
-                />
-                <span className="truncate">{formatSchemaName(stats.schema)}</span>
-              </span>
-              <span className="tabular-nums shrink-0 flex items-center gap-1">
-                {isLoadingTrip && (
-                  <Loader2
-                    className="w-3 h-3 animate-spin"
-                    style={{ color: accent.primary }}
-                  />
-                )}
-                <span>{stats.parseDurationMs}ms</span>
-              </span>
-            </div>
-          )}
         </div>
       )}
 
-      {/* Scrollable Summary List */}
-      <div className="flex-1 overflow-y-auto obsidian-scroll p-2.5 space-y-2">
+      {/* Scrollable Trip List */}
+      <div className="flex-1 overflow-y-auto obsidian-scroll p-2.5 space-y-1.5">
         {!index ? (
           <div className="h-full flex flex-col items-center justify-center text-center px-4 py-8">
-            <div className="w-11 h-11 rounded-2xl bg-slate-900/90 border border-white/10 flex items-center justify-center mb-3">
-              <MapPin className="w-5 h-5 text-slate-400" />
+            <div className="w-10 h-10 rounded-xl instrument-inset flex items-center justify-center mb-3">
+              <MapPin className="w-4 h-4 text-slate-400" />
             </div>
             <p className="text-xs font-medium text-slate-200">
-              No Timeline Loaded Yet
+              No timeline loaded
             </p>
             <p className="mt-1 text-[11px] text-slate-400 leading-relaxed">
-              Import a Google Takeout or on-device Timeline{' '}
-              <code style={{ color: accent.primary }}>.json</code> file, or click{' '}
-              <span className="text-slate-200 font-medium">Load Sample Journey</span>{' '}
-              to preview.
+              Import a Google Timeline{' '}
+              <code style={{ color: accent.primary }}>.json</code> file—cached locally in
+              IndexedDB for instant reopen.
             </p>
           </div>
         ) : filteredItems.length === 0 ? (
           <div className="text-center py-8 px-4">
             <p className="text-xs font-medium text-slate-300">
-              No {viewMode === 'DAY' ? 'days' : 'journeys'} match your filters
+              {discoveryFilter === 'STARRED'
+                ? 'No starred entries yet'
+                : discoveryFilter === 'ON_THIS_DAY'
+                  ? `No history recorded on ${todayMonthDay}`
+                  : `No ${viewMode === 'DAY' ? 'days' : 'journeys'} match`}
             </p>
             <button
               type="button"
               onClick={() => {
+                setDiscoveryFilter('ALL');
                 setSearchQuery('');
                 setMonthFilter('');
                 setDateFilter('');
               }}
-              className="mt-2 px-3 py-1 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-[11px]"
+              className="mt-2 px-3 py-1 rounded-lg instrument-inset hover:bg-white/[0.07] text-[11px] active:scale-[0.98] transition-all"
               style={{ color: accent.text }}
             >
               Reset filters
@@ -490,36 +587,65 @@ export function TripSidebar({
           <>
             {visibleItems.map((item) => {
               const isSelected = item.id === selectedTripId;
+              const isStarred = starredSet.has(item.id);
               return (
-                <button
+                <div
                   key={item.id}
-                  type="button"
                   onClick={() => onSelectTrip(item.id, item.viewMode)}
-                  className="w-full text-left p-2.5 rounded-xl border transition-all"
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      onSelectTrip(item.id, item.viewMode);
+                    }
+                  }}
+                  className="w-full text-left p-2.5 rounded-lg border cursor-pointer active:scale-[0.98] transition-all"
                   style={{
                     backgroundColor: isSelected
                       ? accent.softBg
-                      : 'rgba(255,255,255,0.03)',
+                      : 'rgba(255,255,255,0.025)',
                     borderColor: isSelected
                       ? accent.border
-                      : 'rgba(255,255,255,0.06)',
+                      : 'rgba(255,255,255,0.07)',
                   }}
                 >
                   <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div
-                        className="text-[10px] font-medium truncate"
-                        style={{ color: accent.text }}
-                      >
-                        {item.dateLabel}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className="text-[11px] font-medium truncate"
+                          style={{ color: accent.text }}
+                        >
+                          {item.dateLabel}
+                        </span>
+                        <span className="text-[10px] font-mono text-slate-500 tabular-nums shrink-0">
+                          {formatShortTime(item.startTimeMs)}
+                        </span>
                       </div>
                       <div className="text-xs font-medium text-slate-100 leading-snug line-clamp-2 mt-0.5">
                         {item.title}
                       </div>
                     </div>
-                    <span className="text-[10px] font-mono text-slate-400 tabular-nums shrink-0 mt-0.5">
-                      {formatShortTime(item.startTimeMs)}
-                    </span>
+
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleStar(item.id);
+                      }}
+                      className={`p-1 rounded-md shrink-0 transition-colors ${
+                        isStarred
+                          ? 'text-amber-400 hover:bg-amber-400/10'
+                          : 'text-slate-500 hover:text-slate-200 hover:bg-white/[0.06]'
+                      }`}
+                      title={isStarred ? 'Remove star' : 'Star entry'}
+                      aria-label={isStarred ? 'Remove star' : 'Star entry'}
+                    >
+                      <Star
+                        className={`w-3.5 h-3.5 ${isStarred ? 'fill-current' : ''}`}
+                      />
+                    </button>
                   </div>
 
                   <div className="mt-2 flex items-center justify-between gap-2">
@@ -529,7 +655,7 @@ export function TripSidebar({
                         .map((mode) => (
                           <span
                             key={mode}
-                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-slate-900/90 border border-white/10 text-[10px]"
+                            className="inline-flex items-center px-1.5 py-0.5 rounded-md instrument-inset text-[10px]"
                             style={{ color: MODE_COLORS[mode] }}
                             title={MODE_LABELS[mode]}
                           >
@@ -544,12 +670,12 @@ export function TripSidebar({
                       </span>
                     </div>
 
-                    <div className="text-[10px] text-slate-300 tabular-nums shrink-0">
+                    <div className="text-[11px] font-mono text-slate-300 tabular-nums shrink-0">
                       {formatDistance(item.distanceM, units)} ·{' '}
                       {formatDuration(item.durationMs)}
                     </div>
                   </div>
-                </button>
+                </div>
               );
             })}
 
@@ -557,7 +683,7 @@ export function TripSidebar({
               <button
                 type="button"
                 onClick={() => setVisibleLimit((v) => v + PAGE_SIZE)}
-                className="w-full py-2 rounded-xl bg-white/[0.04] hover:bg-white/10 border border-white/10 text-[11px] font-medium transition-colors"
+                className="w-full py-2 rounded-lg instrument-inset hover:bg-white/[0.07] text-[11px] font-medium active:scale-[0.98] transition-all"
                 style={{ color: accent.text }}
               >
                 Show more ({filteredItems.length - visibleLimit} remaining)
@@ -565,6 +691,26 @@ export function TripSidebar({
             )}
           </>
         )}
+      </div>
+
+      {/* Subtle Instrument Footer with Version & Cache State */}
+      <div className="px-3.5 py-2 border-t border-white/[0.08] flex items-center justify-between gap-2 text-[10px] text-slate-500">
+        <span className="flex items-center gap-1.5 truncate">
+          {isLoadingTrip ? (
+            <Loader2
+              className="w-3 h-3 animate-spin shrink-0"
+              style={{ color: accent.primary }}
+            />
+          ) : (
+            <Database className="w-3 h-3 shrink-0 text-slate-500" />
+          )}
+          <span className="truncate">
+            {cachedFileName ? 'Cached locally' : 'On-device storage'}
+          </span>
+        </span>
+        <span className="font-mono tabular-nums text-slate-400 shrink-0">
+          ChronoMap {APP_VERSION}
+        </span>
       </div>
     </aside>
   );

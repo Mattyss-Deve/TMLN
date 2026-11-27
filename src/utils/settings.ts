@@ -1,5 +1,7 @@
 import type { AccentThemeId, AppSettings } from '../types/timeline';
 
+export const APP_VERSION = 'v1.2.0';
+
 export interface AccentThemeConfig {
   id: AccentThemeId;
   name: string;
