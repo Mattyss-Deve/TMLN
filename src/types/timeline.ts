@@ -25,7 +25,7 @@ export type TimelineSchemaFormat =
 
 export type TimelineViewMode = 'DAY' | 'JOURNEY';
 
-export type MapStyleId = 'DARK' | 'SATELLITE' | 'DAYLIGHT';
+export type MapStyleId = 'DARK' | 'DAYLIGHT' | 'SATELLITE' | 'DYNAMIC';
 
 export type CameraMode = 'CHASE' | 'DRONE' | 'OVERVIEW' | 'FREE';
 
@@ -227,6 +227,7 @@ export interface TelemetryFrame {
   endTimeMs: number;
   progress: number;
   lineProgress: number; // 0..1 geometric distance ratio matching MapLibre line-progress
+  bakedIndex: number; // Exact index in pre-baked spline table <= currentTimeMs
   lat: number;
   lng: number;
   bearing: number;

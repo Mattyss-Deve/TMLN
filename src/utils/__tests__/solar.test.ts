@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { simplifyPolylineRdp } from '../../workers/timelineParser';
 import { computeSolarAtmosphere, computeSolarPosition } from '../solar';
 
-describe('Solar-Synced Ephemeris & All-Style 3D Grading', () => {
+describe('Solar-Synced Ephemeris & Dynamic Mode Grading', () => {
   // Prague (50.0755° N, 14.4378° E)
   const PRAGUE_LAT = 50.0755;
   const PRAGUE_LNG = 14.4378;
@@ -22,7 +22,7 @@ describe('Solar-Synced Ephemeris & All-Style 3D Grading', () => {
     expect(nightSolar.isNight).toBe(true);
   });
 
-  it('grades Satellite raster exposure, Daylight atmospheric tint, fog stars, and puck shadow/headlamp', () => {
+  it('transforms Dynamic mode sky/stars, lit amber city roads, 3D facades, and headlamp + ground pool', () => {
     const noonSolar = computeSolarPosition(
       PRAGUE_LAT,
       PRAGUE_LNG,
@@ -39,27 +39,28 @@ describe('Solar-Synced Ephemeris & All-Style 3D Grading', () => {
       Date.UTC(2024, 2, 20, 5, 20, 0)
     );
 
-    const satNoon = computeSolarAtmosphere(noonSolar, 'SATELLITE');
-    const satNight = computeSolarAtmosphere(nightSolar, 'SATELLITE');
-    expect(satNoon.raster.brightnessMax).toBeCloseTo(1.0, 2);
-    expect(satNight.raster.brightnessMax).toBeCloseTo(0.26, 2);
-    expect(satNight.raster.brightnessMin).toBeCloseTo(0.02, 2);
-    expect(satNight.raster.saturation).toBeCloseTo(-0.35, 2);
+    const dynNoon = computeSolarAtmosphere(noonSolar, 'DYNAMIC');
+    const dynNight = computeSolarAtmosphere(nightSolar, 'DYNAMIC');
+    const dynGolden = computeSolarAtmosphere(goldenSolar, 'DYNAMIC');
 
-    const dayNightTint = computeSolarAtmosphere(nightSolar, 'DAYLIGHT');
-    const dayNoonTint = computeSolarAtmosphere(noonSolar, 'DAYLIGHT');
-    const dayGolden = computeSolarAtmosphere(goldenSolar, 'DAYLIGHT');
-    expect(dayNightTint.tint.color.toLowerCase()).toBe('#040814');
-    expect(dayNightTint.tint.opacity).toBeCloseTo(0.62, 2);
-    expect(dayNoonTint.tint.opacity).toBe(0);
-    expect(dayGolden.tint.opacity).toBeGreaterThan(0.04);
-    expect(dayNightTint.fog['star-intensity']).toBeCloseTo(0.85, 2);
+    // Sky & Starfield transitions
+    expect(dynNight.sky['sky-color'].toLowerCase()).toBe('#040711');
+    expect(dynNight.fog['star-intensity']).toBeCloseTo(0.9, 2);
+    expect(dynNoon.sky['sky-color'].toLowerCase()).toBe('#87bfff');
+    expect(dynNoon.fog['star-intensity']).toBe(0);
 
-    // Daytime sun shadow vs Night headlamp crossfade
-    expect(satNoon.puck.shadowOpacity).toBeGreaterThan(0.4);
-    expect(satNoon.puck.headlampOpacity).toBe(0);
-    expect(satNight.puck.shadowOpacity).toBe(0);
-    expect(satNight.puck.headlampOpacity).toBe(1);
+    // Lit amber city arteries at night & daylight ground
+    expect(dynNight.dynamicVector.majorRoadColor.toLowerCase()).toBe('#ffb74d');
+    expect(dynGolden.tint.opacity).toBeGreaterThan(0.04);
+    expect(dynNoon.tint.opacity).toBe(0);
+
+    // Daytime sun shadow vs Night headlamp + ambient ground pool crossfade
+    expect(dynNoon.puck.shadowOpacity).toBeGreaterThan(0.4);
+    expect(dynNoon.puck.headlampOpacity).toBe(0);
+    expect(dynNoon.puck.groundPoolOpacity).toBe(0);
+    expect(dynNight.puck.shadowOpacity).toBe(0);
+    expect(dynNight.puck.headlampOpacity).toBe(1);
+    expect(dynNight.puck.groundPoolOpacity).toBeGreaterThan(0.75);
   });
 });
 
@@ -67,11 +68,11 @@ describe('Worker RDP Polyline Simplification', () => {
   it('prunes sub-3m redundant GPS jitter while preserving corners and endpoints', () => {
     const straightWithJitter = [
       { lat: 50.08, lng: 14.42 },
-      { lat: 50.0805, lng: 14.420005 }, // ~0.3m lateral jitter
-      { lat: 50.081, lng: 14.419996 }, // ~0.3m lateral jitter
-      { lat: 50.0815, lng: 14.420002 }, // ~0.2m lateral jitter
-      { lat: 50.082, lng: 14.42 }, // sharp corner start
-      { lat: 50.082, lng: 14.422 }, // 140m east turn
+      { lat: 50.0805, lng: 14.420005 },
+      { lat: 50.081, lng: 14.419996 },
+      { lat: 50.0815, lng: 14.420002 },
+      { lat: 50.082, lng: 14.42 },
+      { lat: 50.082, lng: 14.422 },
     ];
 
     const simplified = simplifyPolylineRdp(straightWithJitter, 3);

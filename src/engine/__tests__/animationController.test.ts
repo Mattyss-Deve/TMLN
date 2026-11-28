@@ -159,6 +159,17 @@ describe('AnimationController 60fps playback and telemetry', () => {
     }
     expect(prevLineProgress).toBeCloseTo(1, 5);
 
+    // Exact multi-colored route tail locks 100% to interpolated puck tip
+    controller.seekToProgress(0.55);
+    const midFrame = controller.getSnapshot()!;
+    const trail = controller.buildTraveledGeoJson(midFrame);
+    expect(trail.features.length).toBeGreaterThan(0);
+    const lastFeature = trail.features[trail.features.length - 1];
+    const lastGeom = lastFeature.geometry as GeoJSON.LineString;
+    const lastCoord = lastGeom.coordinates[lastGeom.coordinates.length - 1];
+    expect(lastCoord[0]).toBeCloseTo(midFrame.lng, 6);
+    expect(lastCoord[1]).toBeCloseTo(midFrame.lat, 6);
+
     controller.destroy();
   });
 });

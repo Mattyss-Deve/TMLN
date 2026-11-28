@@ -1,6 +1,6 @@
 import type { AccentThemeId, AppSettings } from '../types/timeline';
 
-export const APP_VERSION = 'v1.4.0';
+export const APP_VERSION = 'v1.5.0';
 
 export interface AccentThemeConfig {
   id: AccentThemeId;
@@ -99,7 +99,8 @@ export function loadSettings(): AppSettings {
     const mapStyle =
       parsed.mapStyle === 'DARK' ||
       parsed.mapStyle === 'SATELLITE' ||
-      parsed.mapStyle === 'DAYLIGHT'
+      parsed.mapStyle === 'DAYLIGHT' ||
+      parsed.mapStyle === 'DYNAMIC'
         ? parsed.mapStyle
         : DEFAULT_SETTINGS.mapStyle;
     const enable3D =

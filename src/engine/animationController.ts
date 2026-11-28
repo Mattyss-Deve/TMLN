@@ -77,6 +77,7 @@ interface BakedTimeline {
   times: Float64Array;
   lats: Float64Array;
   lngs: Float64Array;
+  coordPairs: [number, number][]; // Pre-allocated [lng, lat] pairs for zero-churn trail slicing
   bearings: Float64Array;
   speeds: Float64Array;
   cumDistM: Float64Array;
@@ -190,6 +191,10 @@ export function prebakeTripTimeline(trip: Trip): BakedTimeline {
   const times = new Float64Array(timesList);
   const lats = new Float64Array(latsList);
   const lngs = new Float64Array(lngsList);
+  const coordPairs: [number, number][] = new Array(count);
+  for (let i = 0; i < count; i++) {
+    coordPairs[i] = [lngs[i], lats[i]];
+  }
   const bearings = new Float64Array(bearingsList);
   const speeds = new Float64Array(speedsList);
   const cumDistM = new Float64Array(cumDistList);
@@ -285,6 +290,7 @@ export function prebakeTripTimeline(trip: Trip): BakedTimeline {
     times,
     lats,
     lngs,
+    coordPairs,
     bearings,
     speeds,
     cumDistM,
@@ -361,6 +367,80 @@ export class AnimationController {
 
   public getPrebakedRoute(): PrebakedRoute | null {
     return this.baked?.route ?? null;
+  }
+
+  /**
+   * Builds a multi-colored GeoJSON FeatureCollection of the exact traveled route
+   * from vertex 0 up to `frame.bakedIndex` plus the exact current interpolated
+   * `[frame.lng, frame.lat]` tip. Reuses pre-allocated `[lng, lat]` tuples so
+   * 30fps route-tail updates are fast, never vanish, and stay 100% locked to the puck.
+   */
+  public buildTraveledGeoJson(frame: TelemetryFrame): GeoJSON.FeatureCollection {
+    const b = this.baked;
+    if (!b || b.count === 0 || b.route.tripId !== frame.tripId) {
+      return { type: 'FeatureCollection', features: [] };
+    }
+
+    const endIdx = clamp(frame.bakedIndex, 0, b.count - 1);
+    const features: GeoJSON.Feature<GeoJSON.LineString>[] = [];
+
+    let runModeIdx = b.modeIndices[0];
+    let runCoords: [number, number][] = [b.coordPairs[0]];
+
+    for (let i = 1; i <= endIdx; i++) {
+      const mIdx = b.modeIndices[i];
+      const pt = b.coordPairs[i];
+
+      if (mIdx !== runModeIdx) {
+        // Connect cleanly to transition vertex before starting new mode run
+        const prevPt = runCoords[runCoords.length - 1];
+        if (prevPt[0] !== pt[0] || prevPt[1] !== pt[1]) {
+          runCoords.push(pt);
+        }
+        if (runCoords.length >= 2) {
+          const mode = MODE_LIST[runModeIdx];
+          features.push({
+            type: 'Feature',
+            properties: { color: MODE_COLORS[mode], mode },
+            geometry: { type: 'LineString', coordinates: runCoords },
+          });
+        }
+        runModeIdx = mIdx;
+        runCoords = [pt];
+      } else {
+        const prevPt = runCoords[runCoords.length - 1];
+        if (
+          Math.abs(prevPt[0] - pt[0]) > 1e-7 ||
+          Math.abs(prevPt[1] - pt[1]) > 1e-7
+        ) {
+          runCoords.push(pt);
+        }
+      }
+    }
+
+    // Always append exact interpolated tip [frame.lng, frame.lat] so tail locks 100% to puck
+    const tip: [number, number] = [frame.lng, frame.lat];
+    const lastPt = runCoords[runCoords.length - 1];
+    if (
+      Math.abs(lastPt[0] - tip[0]) > 1e-8 ||
+      Math.abs(lastPt[1] - tip[1]) > 1e-8
+    ) {
+      runCoords.push(tip);
+    }
+
+    if (runCoords.length >= 2) {
+      const mode = MODE_LIST[runModeIdx];
+      features.push({
+        type: 'Feature',
+        properties: { color: MODE_COLORS[mode], mode },
+        geometry: { type: 'LineString', coordinates: runCoords },
+      });
+    }
+
+    return {
+      type: 'FeatureCollection',
+      features,
+    };
   }
 
   public play(): void {
@@ -656,6 +736,7 @@ export class AnimationController {
       endTimeMs: this.trip.endTimeMs,
       progress,
       lineProgress,
+      bakedIndex: i0,
       lat,
       lng,
       bearing: this.smoothedBearing,

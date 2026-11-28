@@ -17,6 +17,7 @@ import {
   Settings,
   Sparkles,
   Sun,
+  SunMoon,
   UploadCloud,
   Video,
   X,
@@ -758,10 +759,36 @@ export default function App() {
       : summaryIndex.journeys.length
     : 0;
 
-  const mapStyles: { id: MapStyleId; label: string; icon: JSX.Element }[] = [
-    { id: 'DARK', label: 'Dark', icon: <Moon className="w-3.5 h-3.5" /> },
-    { id: 'SATELLITE', label: 'Sat', icon: <Satellite className="w-3.5 h-3.5" /> },
-    { id: 'DAYLIGHT', label: 'Day', icon: <Sun className="w-3.5 h-3.5" /> },
+  const mapStyles: {
+    id: MapStyleId;
+    label: string;
+    title: string;
+    icon: JSX.Element;
+  }[] = [
+    {
+      id: 'DARK',
+      label: 'Night',
+      title: 'Night (Carto Dark Matter)',
+      icon: <Moon className="w-3.5 h-3.5" />,
+    },
+    {
+      id: 'DAYLIGHT',
+      label: 'Day',
+      title: 'Day (OpenFreeMap Daylight)',
+      icon: <Sun className="w-3.5 h-3.5" />,
+    },
+    {
+      id: 'SATELLITE',
+      label: 'Sat',
+      title: 'Satellite Hybrid (Esri Imagery)',
+      icon: <Satellite className="w-3.5 h-3.5" />,
+    },
+    {
+      id: 'DYNAMIC',
+      label: 'Dynamic',
+      title: 'Dynamic (Full-Scene Solar Day/Night Cycle)',
+      icon: <SunMoon className="w-3.5 h-3.5" />,
+    },
   ];
 
   const cameraItems: {
@@ -926,41 +953,42 @@ export default function App() {
         </div>
       )}
 
-      {/* Unified Top Safe-Area Instrument Strip (fades out cleanly in Cinema Mode) */}
+      {/* Unified Top Safe-Area Instrument Strip (fits cleanly inside 360px viewports) */}
       <header
-        className={`fixed top-0 left-0 right-0 z-20 px-3 pointer-events-none safe-top-hud transition-opacity duration-300 ${
+        className={`fixed top-0 left-0 right-0 z-20 px-2 sm:px-3 pointer-events-none safe-top-hud transition-opacity duration-300 ${
           hudHidden ? 'opacity-0 pointer-events-none' : 'opacity-100'
         }`}
       >
         <div
-          className={`pt-2 flex flex-wrap items-start justify-between gap-2 transition-all ${
+          className={`pt-2 flex flex-wrap items-start justify-between gap-1.5 sm:gap-2 transition-all ${
             sidebarOpen ? 'md:pl-[344px]' : ''
           }`}
         >
-          {/* Left: Single Unified Instrument Control Bar */}
+          {/* Left: Compact Unified Instrument Control Bar (zero right-edge clipping at 360px) */}
           <div
             className={`${
               hudHidden ? 'pointer-events-none' : 'pointer-events-auto'
-            } flex flex-wrap items-center gap-1.5 max-w-full`}
+            } flex flex-wrap items-center gap-1 max-w-full min-w-0`}
           >
-            <div className="instrument-surface rounded-xl p-1 flex items-center gap-0.5 max-w-full overflow-x-auto">
+            <div className="instrument-surface rounded-xl p-0.5 sm:p-1 flex items-center gap-[1px] sm:gap-0.5 max-w-full">
               {/* Trips Drawer Trigger (when collapsed) */}
               {!sidebarOpen && (
                 <>
                   <button
                     type="button"
                     onClick={() => setSidebarOpen(true)}
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-100 hover:bg-white/[0.07] active:scale-[0.98] transition-all shrink-0"
+                    className="flex items-center gap-1 px-1 sm:px-2.5 py-1.5 rounded-lg text-[11px] sm:text-xs font-medium text-slate-100 hover:bg-white/[0.07] active:scale-[0.98] transition-all shrink-0"
                     title="Open Trip Explorer"
+                    aria-label="Open Trip Explorer"
                   >
                     <Compass
                       className="w-3.5 h-3.5 shrink-0"
                       style={{ color: accent.primary }}
                     />
-                    <span>Trips</span>
+                    <span className="hidden sm:inline">Trips</span>
                     {totalBadgeCount > 0 && (
                       <span
-                        className="px-1.5 py-0.5 rounded-md text-[10px] font-mono tabular-nums"
+                        className="hidden sm:inline px-1.5 py-0.5 rounded-md text-[10px] font-mono tabular-nums"
                         style={{
                           backgroundColor: accent.softBg,
                           color: accent.text,
@@ -969,13 +997,13 @@ export default function App() {
                         {totalBadgeCount}
                       </span>
                     )}
-                    <ChevronRight className="w-3 h-3 text-slate-500 shrink-0" />
+                    <ChevronRight className="hidden sm:inline w-3 h-3 text-slate-500 shrink-0" />
                   </button>
-                  <div className="w-px h-4 bg-white/[0.08] mx-0.5 shrink-0" />
+                  <div className="w-px h-3.5 bg-white/[0.08] shrink-0" />
                 </>
               )}
 
-              {/* Map Style Selector */}
+              {/* 4 Map Modes: Night / Day / Sat / Dynamic */}
               {mapStyles.map((s) => {
                 const active = settings.mapStyle === s.id;
                 return (
@@ -983,13 +1011,14 @@ export default function App() {
                     key={s.id}
                     type="button"
                     onClick={() => handleUpdateSettings({ mapStyle: s.id })}
-                    className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium active:scale-[0.98] transition-all border shrink-0"
+                    className="flex items-center gap-1 px-1 sm:px-2 py-1.5 rounded-lg text-[11px] font-medium active:scale-[0.98] transition-all border shrink-0"
                     style={{
                       backgroundColor: active ? accent.softBg : 'transparent',
                       borderColor: active ? accent.border : 'transparent',
                       color: active ? accent.text : '#94a3b8',
                     }}
-                    title={`${s.label} map style`}
+                    title={s.title}
+                    aria-label={s.title}
                   >
                     {s.icon}
                     <span className="hidden xl:inline">{s.label}</span>
@@ -997,30 +1026,30 @@ export default function App() {
                 );
               })}
 
-              <div className="w-px h-4 bg-white/[0.08] mx-0.5 shrink-0" />
+              <div className="w-px h-3.5 bg-white/[0.08] shrink-0" />
 
-              {/* 3D Buildings Toggle */}
+              {/* True Flat 2D vs Extruded 3D Toggle */}
               <button
                 type="button"
                 onClick={() =>
                   handleUpdateSettings({ enable3D: !settings.enable3D })
                 }
-                className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium active:scale-[0.98] transition-all border shrink-0"
+                className="flex items-center gap-0.5 sm:gap-1 px-1 sm:px-2 py-1.5 rounded-lg text-[10px] sm:text-[11px] font-semibold active:scale-[0.98] transition-all border shrink-0"
                 style={{
                   backgroundColor: settings.enable3D ? accent.softBg : 'transparent',
                   borderColor: settings.enable3D ? accent.border : 'transparent',
                   color: settings.enable3D ? accent.text : '#94a3b8',
                 }}
-                title="Toggle 3D Extruded Buildings"
+                title="Toggle Flat 2D vs Extruded 3D Buildings"
               >
-                <Box className="w-3.5 h-3.5" />
+                <Box className="hidden sm:inline w-3.5 h-3.5" />
                 <span>3D</span>
               </button>
 
               {/* Camera Mode Selector & Director's Cinema Button (when trip loaded) */}
               {activeTrip && (
                 <>
-                  <div className="w-px h-4 bg-white/[0.08] mx-0.5 shrink-0" />
+                  <div className="w-px h-3.5 bg-white/[0.08] shrink-0" />
                   {cameraItems.map((item) => {
                     const active = cameraMode === item.id;
                     return (
@@ -1028,13 +1057,14 @@ export default function App() {
                         key={item.id}
                         type="button"
                         onClick={() => handleSelectCameraMode(item.id)}
-                        className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium active:scale-[0.98] transition-all border shrink-0"
+                        className="flex items-center gap-1 px-1 sm:px-2 py-1.5 rounded-lg text-[11px] font-medium active:scale-[0.98] transition-all border shrink-0"
                         style={{
                           backgroundColor: active ? accent.softBg : 'transparent',
                           borderColor: active ? accent.border : 'transparent',
                           color: active ? accent.text : '#94a3b8',
                         }}
                         title={item.title}
+                        aria-label={item.title}
                       >
                         {item.icon}
                         <span className="hidden lg:inline">{item.label}</span>
@@ -1042,12 +1072,12 @@ export default function App() {
                     );
                   })}
 
-                  <div className="w-px h-4 bg-white/[0.08] mx-0.5 shrink-0" />
+                  <div className="w-px h-3.5 bg-white/[0.08] shrink-0" />
 
                   <button
                     type="button"
                     onClick={enterCinemaMode}
-                    className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-medium text-slate-300 hover:text-white hover:bg-white/[0.07] active:scale-[0.98] transition-all shrink-0"
+                    className="flex items-center gap-1 px-1 sm:px-2 py-1.5 rounded-lg text-[11px] font-medium text-slate-300 hover:text-white hover:bg-white/[0.07] active:scale-[0.98] transition-all shrink-0"
                     title="Enter Director's Cinema Mode (or tap empty map)"
                     aria-label="Enter Cinema Mode"
                   >
@@ -1057,13 +1087,13 @@ export default function App() {
                 </>
               )}
 
-              <div className="w-px h-4 bg-white/[0.08] mx-0.5 shrink-0" />
+              <div className="w-px h-3.5 bg-white/[0.08] shrink-0" />
 
-              {/* Settings Trigger */}
+              {/* Settings Trigger (always visible inside 360px viewport) */}
               <button
                 type="button"
                 onClick={() => setIsSettingsOpen(true)}
-                className="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-white/[0.07] active:scale-[0.98] transition-all shrink-0"
+                className="px-1 sm:px-1.5 py-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-white/[0.07] active:scale-[0.98] transition-all shrink-0"
                 title="Settings"
                 aria-label="Open Settings"
               >

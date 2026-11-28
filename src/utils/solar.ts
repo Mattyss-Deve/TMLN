@@ -5,10 +5,10 @@ const DEG2RAD = Math.PI / 180;
 const RAD2DEG = 180 / Math.PI;
 
 export interface SolarRasterGrading {
-  brightnessMax: number; // 0.26 (night) -> 1.0 (noon)
-  brightnessMin: number; // 0.02 (night) -> 0.0 (day)
-  contrast: number; // 0.22 (night/golden) -> 0.02 (noon)
-  saturation: number; // -0.35 (night), +0.18 (golden), 0.0 (noon)
+  brightnessMax: number;
+  brightnessMin: number;
+  contrast: number;
+  saturation: number;
 }
 
 export interface SolarTintGrading {
@@ -20,14 +20,29 @@ export interface SolarFogSpec {
   color: string;
   'high-color': string;
   'space-color': string;
-  'star-intensity': number; // 0..0.85
+  'star-intensity': number; // 0..0.9
 }
 
 export interface SolarPuckLighting {
   shadowDxPx: number;
   shadowDyPx: number;
-  shadowOpacity: number; // 0..0.62 during daytime
+  shadowOpacity: number; // 0..0.6 during daytime
   headlampOpacity: number; // 0..1 when elevation < 2°
+  groundPoolOpacity: number; // 0..0.88 ambient ground pool at night
+}
+
+export interface DynamicVectorPalette {
+  backgroundColor: string;
+  landColor: string;
+  parkColor: string;
+  waterColor: string;
+  majorRoadColor: string;
+  minorRoadColor: string;
+  labelColor: string;
+  labelHaloColor: string;
+  buildingBaseColor: string;
+  buildingMidColor: string;
+  buildingRoofColor: string;
 }
 
 export interface SolarAtmosphere {
@@ -50,9 +65,10 @@ export interface SolarAtmosphere {
   fog: SolarFogSpec;
   raster: SolarRasterGrading;
   tint: SolarTintGrading;
+  dynamicVector: DynamicVectorPalette;
   buildingColor: string;
   buildingOpacity: number;
-  routeGlowOpacityBoost: number; // multiplier 1.0..1.55
+  routeGlowOpacityBoost: number; // multiplier 1.0..1.6
   puck: SolarPuckLighting;
 }
 
@@ -78,25 +94,21 @@ export function computeSolarPosition(
   // Days since J2000.0 (2000-01-01T12:00:00Z = 946728000000 ms)
   const d = (safeTs - 946_728_000_000) / 86_400_000;
 
-  // Mean longitude & mean anomaly of the Sun (degrees)
   const L = normalizeDeg(280.460 + 0.9856474 * d);
   const g = normalizeDeg(357.528 + 0.9856003 * d);
   const gRad = g * DEG2RAD;
 
-  // Ecliptic longitude & obliquity of the ecliptic
   const lambda = normalizeDeg(
     L + 1.915 * Math.sin(gRad) + 0.020 * Math.sin(2 * gRad)
   );
   const lambdaRad = lambda * DEG2RAD;
   const epsilonRad = (23.439 - 0.0000004 * d) * DEG2RAD;
 
-  // Sun's right ascension (rad) & declination (rad)
   const sinLambda = Math.sin(lambdaRad);
   const cosLambda = Math.cos(lambdaRad);
   const raRad = Math.atan2(Math.cos(epsilonRad) * sinLambda, cosLambda);
   const declRad = Math.asin(clamp(Math.sin(epsilonRad) * sinLambda, -1, 1));
 
-  // Greenwich Mean Sidereal Time (degrees) & Local Hour Angle (rad)
   const gmstDeg = normalizeDeg(280.46061837 + 360.98564736629 * d);
   const lstDeg = normalizeDeg(gmstDeg + safeLng);
   const haRad = lstDeg * DEG2RAD - raRad;
@@ -186,142 +198,178 @@ interface PaletteStop {
   rasterContrast: number;
   rasterSat: number;
   tintColor: string;
-  tintDaylightOpacity: number;
-  tintDarkOpacity: number;
-  tintSatOpacity: number;
-  buildingDark: string;
-  buildingLight: string;
-  buildingSat: string;
+  tintDynamicOpacity: number;
+  bgColor: string;
+  landColor: string;
+  parkColor: string;
+  waterColor: string;
+  majorRoadColor: string;
+  minorRoadColor: string;
+  labelColor: string;
+  labelHaloColor: string;
+  buildingBase: string;
+  buildingMid: string;
+  buildingRoof: string;
   glowBoost: number;
 }
 
 const SOLAR_STOPS: PaletteStop[] = [
   {
-    // Deep Night
+    // Deep Starry Midnight
     elev: -18,
     darkness: 1.0,
-    lightColor: '#3b4f78',
-    lightIntensity: 0.24,
-    skyColor: '#040814',
-    horizonColor: '#0c1528',
-    fogColor: '#060a14',
+    lightColor: '#486299',
+    lightIntensity: 0.26,
+    skyColor: '#040711',
+    horizonColor: '#0c1428',
+    fogColor: '#050914',
     spaceColor: '#02040a',
-    starIntensity: 0.85,
-    rasterMax: 0.26,
+    starIntensity: 0.9,
+    rasterMax: 0.28,
     rasterMin: 0.02,
     rasterContrast: 0.22,
     rasterSat: -0.35,
-    tintColor: '#040814',
-    tintDaylightOpacity: 0.62,
-    tintDarkOpacity: 0.34,
-    tintSatOpacity: 0.16,
-    buildingDark: '#0b1220',
-    buildingLight: '#172236',
-    buildingSat: '#0e1525',
-    glowBoost: 1.55,
+    tintColor: '#040711',
+    tintDynamicOpacity: 0.22,
+    bgColor: '#060a13',
+    landColor: '#0b1120',
+    parkColor: '#09191b',
+    waterColor: '#040915',
+    majorRoadColor: '#FFB74D', // Warm golden-amber city streetglow
+    minorRoadColor: '#243147',
+    labelColor: '#cbd5e1',
+    labelHaloColor: '#040711',
+    buildingBase: '#0d1526',
+    buildingMid: '#2a3752', // Subtle slate + lit window elevation
+    buildingRoof: '#8c6b32', // Warm subtle amber rooftop glow
+    glowBoost: 1.6,
   },
   {
-    // Blue Hour
+    // Purple-Blue Twilight (Blue Hour)
     elev: -6,
     darkness: 0.72,
-    lightColor: '#6b82ba',
-    lightIntensity: 0.42,
-    skyColor: '#0b1530',
-    horizonColor: '#283f73',
-    fogColor: '#111c36',
-    spaceColor: '#050a18',
+    lightColor: '#7a8ec9',
+    lightIntensity: 0.44,
+    skyColor: '#1B224B',
+    horizonColor: '#363E7A',
+    fogColor: '#171E42',
+    spaceColor: '#080C22',
     starIntensity: 0.55,
-    rasterMax: 0.48,
+    rasterMax: 0.5,
     rasterMin: 0.015,
     rasterContrast: 0.22,
     rasterSat: -0.18,
-    tintColor: '#091530',
-    tintDaylightOpacity: 0.42,
-    tintDarkOpacity: 0.22,
-    tintSatOpacity: 0.12,
-    buildingDark: '#16233d',
-    buildingLight: '#364662',
-    buildingSat: '#19253b',
-    glowBoost: 1.38,
+    tintColor: '#1B224B',
+    tintDynamicOpacity: 0.16,
+    bgColor: '#121831',
+    landColor: '#1a2342',
+    parkColor: '#152c36',
+    waterColor: '#0c1836',
+    majorRoadColor: '#FDBA74',
+    minorRoadColor: '#3b4a6b',
+    labelColor: '#e2e8f0',
+    labelHaloColor: '#0d1329',
+    buildingBase: '#1b2645',
+    buildingMid: '#3a4a70',
+    buildingRoof: '#a67b4b',
+    glowBoost: 1.4,
   },
   {
-    // Dawn / Dusk / Low Golden Hour
+    // Sunrise / Sunset / Warm Golden Horizon
     elev: 2,
-    darkness: 0.32,
-    lightColor: '#ff9c54',
-    lightIntensity: 0.72,
-    skyColor: '#233059',
-    horizonColor: '#ff8c42',
-    fogColor: '#4a3540',
-    spaceColor: '#0b1024',
-    starIntensity: 0.12,
-    rasterMax: 0.78,
+    darkness: 0.3,
+    lightColor: '#FF8A3D',
+    lightIntensity: 0.74,
+    skyColor: '#3d528a',
+    horizonColor: '#FF8A3D',
+    fogColor: '#FFD180',
+    spaceColor: '#162042',
+    starIntensity: 0.1,
+    rasterMax: 0.8,
     rasterMin: 0.005,
-    rasterContrast: 0.22,
+    rasterContrast: 0.2,
     rasterSat: 0.18,
-    tintColor: '#FF8C42',
-    tintDaylightOpacity: 0.14,
-    tintDarkOpacity: 0.14,
-    tintSatOpacity: 0.10,
-    buildingDark: '#2f2738',
-    buildingLight: '#cfa98b',
-    buildingSat: '#2d2636',
-    glowBoost: 1.2,
+    tintColor: '#FF8A3D',
+    tintDynamicOpacity: 0.12,
+    bgColor: '#dcd2c6',
+    landColor: '#e4d8ca',
+    parkColor: '#b7c7a0',
+    waterColor: '#6d94b8',
+    majorRoadColor: '#FFD180',
+    minorRoadColor: '#f5ebe0',
+    labelColor: '#2d2633',
+    labelHaloColor: '#fff4e6',
+    buildingBase: '#d4bfa8',
+    buildingMid: '#e6c89e',
+    buildingRoof: '#f5d29c',
+    glowBoost: 1.18,
   },
   {
     // Upper Golden Hour
     elev: 12,
-    darkness: 0.12,
-    lightColor: '#fde68a',
-    lightIntensity: 0.82,
-    skyColor: '#36609c',
-    horizonColor: '#fbbf77',
-    fogColor: '#8899ad',
-    spaceColor: '#13264a',
+    darkness: 0.1,
+    lightColor: '#FFD180',
+    lightIntensity: 0.84,
+    skyColor: '#568fd6',
+    horizonColor: '#FFD180',
+    fogColor: '#e6dfd5',
+    spaceColor: '#1e427d',
     starIntensity: 0.0,
-    rasterMax: 0.92,
+    rasterMax: 0.94,
     rasterMin: 0.0,
-    rasterContrast: 0.14,
-    rasterSat: 0.14,
-    tintColor: '#FF8C42',
-    tintDaylightOpacity: 0.08,
-    tintDarkOpacity: 0.07,
-    tintSatOpacity: 0.05,
-    buildingDark: '#26344a',
-    buildingLight: '#ded1be',
-    buildingSat: '#293547',
-    glowBoost: 1.08,
+    rasterContrast: 0.1,
+    rasterSat: 0.12,
+    tintColor: '#FFD180',
+    tintDynamicOpacity: 0.05,
+    bgColor: '#ece7df',
+    landColor: '#f0ebe2',
+    parkColor: '#c8deb6',
+    waterColor: '#88bbe6',
+    majorRoadColor: '#fde68a',
+    minorRoadColor: '#ffffff',
+    labelColor: '#1e293b',
+    labelHaloColor: '#ffffff',
+    buildingBase: '#dfd6c8',
+    buildingMid: '#e8dfd1',
+    buildingRoof: '#f2eadc',
+    glowBoost: 1.06,
   },
   {
-    // Noon / High Daylight
+    // Crisp Azure Daylight (Noon)
     elev: 35,
     darkness: 0.0,
     lightColor: '#f8fafc',
-    lightIntensity: 0.9,
-    skyColor: '#2c68b8',
-    horizonColor: '#9fc8eb',
-    fogColor: '#d0dae6',
-    spaceColor: '#17386b',
+    lightIntensity: 0.92,
+    skyColor: '#87BFFF',
+    horizonColor: '#d2e8ff',
+    fogColor: '#e2edf8',
+    spaceColor: '#2a62b5',
     starIntensity: 0.0,
     rasterMax: 1.0,
     rasterMin: 0.0,
-    rasterContrast: 0.02,
+    rasterContrast: 0.0,
     rasterSat: 0.0,
-    tintColor: '#FF8C42',
-    tintDaylightOpacity: 0.0,
-    tintDarkOpacity: 0.0,
-    tintSatOpacity: 0.0,
-    buildingDark: '#1f304a',
-    buildingLight: '#dbe2eb',
-    buildingSat: '#212e42',
+    tintColor: '#87BFFF',
+    tintDynamicOpacity: 0.0,
+    bgColor: '#f2f0eb',
+    landColor: '#f4f2ed',
+    parkColor: '#cde4bc',
+    waterColor: '#93c5fd',
+    majorRoadColor: '#fde68a',
+    minorRoadColor: '#ffffff',
+    labelColor: '#1e293b',
+    labelHaloColor: '#ffffff',
+    buildingBase: '#d8dee6',
+    buildingMid: '#e2e7ee',
+    buildingRoof: '#eef2f6',
     glowBoost: 1.0,
   },
 ];
 
 /**
- * Computes full-scene solar grading for ALL map styles (Dark, Satellite, Daylight),
- * including raster exposure, atmospheric tint, sky/fog/stars, 3D building facades,
- * route glow bloom, daytime sun shadow vector, and night headlamp intensity.
+ * Computes full-scene solar grading for Dynamic Day/Night mode (sky/fog/stars,
+ * ground/park/water/lit city roads, 3D building facades, directional sun shadow,
+ * and bright night headlamp + ground pool).
  */
 export function computeSolarAtmosphere(
   solar: SolarPosition,
@@ -355,18 +403,9 @@ export function computeSolarAtmosphere(
   const polarDeg = clamp(90 - Math.max(4, elev), 14, 84);
   const azimuthDeg = normalizeDeg(solar.azimuthDeg);
 
-  const skyColor =
-    mapStyle === 'DARK'
-      ? lerpColor('#040814', lerpColor(s0.skyColor, s1.skyColor, localT), 0.52)
-      : lerpColor(s0.skyColor, s1.skyColor, localT);
-  const horizonColor =
-    mapStyle === 'DARK'
-      ? lerpColor('#0a1120', lerpColor(s0.horizonColor, s1.horizonColor, localT), 0.56)
-      : lerpColor(s0.horizonColor, s1.horizonColor, localT);
-  const fogColor =
-    mapStyle === 'DARK'
-      ? lerpColor('#060a14', lerpColor(s0.fogColor, s1.fogColor, localT), 0.45)
-      : lerpColor(s0.fogColor, s1.fogColor, localT);
+  const skyColor = lerpColor(s0.skyColor, s1.skyColor, localT);
+  const horizonColor = lerpColor(s0.horizonColor, s1.horizonColor, localT);
+  const fogColor = lerpColor(s0.fogColor, s1.fogColor, localT);
   const spaceColor = lerpColor(s0.spaceColor, s1.spaceColor, localT);
   const starIntensity = Number(
     lerpNum(s0.starIntensity, s1.starIntensity, localT).toFixed(2)
@@ -374,35 +413,27 @@ export function computeSolarAtmosphere(
 
   const tintColor = lerpColor(s0.tintColor, s1.tintColor, localT);
   const tintOpacity =
-    mapStyle === 'DAYLIGHT'
-      ? lerpNum(s0.tintDaylightOpacity, s1.tintDaylightOpacity, localT)
-      : mapStyle === 'SATELLITE'
-        ? lerpNum(s0.tintSatOpacity, s1.tintSatOpacity, localT)
-        : lerpNum(s0.tintDarkOpacity, s1.tintDarkOpacity, localT);
+    mapStyle === 'DYNAMIC'
+      ? lerpNum(s0.tintDynamicOpacity, s1.tintDynamicOpacity, localT)
+      : 0;
 
-  const buildingColor =
-    mapStyle === 'DAYLIGHT'
-      ? lerpColor(s0.buildingLight, s1.buildingLight, localT)
-      : mapStyle === 'SATELLITE'
-        ? lerpColor(s0.buildingSat, s1.buildingSat, localT)
-        : lerpColor(s0.buildingDark, s1.buildingDark, localT);
+  const buildingBaseColor = lerpColor(s0.buildingBase, s1.buildingBase, localT);
+  const buildingMidColor = lerpColor(s0.buildingMid, s1.buildingMid, localT);
+  const buildingRoofColor = lerpColor(s0.buildingRoof, s1.buildingRoof, localT);
 
   const buildingOpacity =
     mapStyle === 'SATELLITE'
-      ? lerpNum(0.68, 0.54, clamp((elev + 12) / 30, 0, 1))
-      : lerpNum(0.84, 0.72, clamp((elev + 12) / 30, 0, 1));
+      ? 0.56
+      : Number(lerpNum(0.86, 0.74, clamp((elev + 12) / 30, 0, 1)).toFixed(2));
 
-  // Sun-tracked puck shadow (opposite solar azimuth) & Night Headlamp (< 2° elevation)
+  // Directional daytime sun shadow opposite solar azimuth + night headlamp + ground light pool
   const oppositeAzRad = normalizeDeg(azimuthDeg + 180) * DEG2RAD;
   const shadowReachPx = lerpNum(12, 3.5, clamp((elev - 2) / 55, 0, 1));
   const shadowDxPx = Number((Math.sin(oppositeAzRad) * shadowReachPx).toFixed(1));
   const shadowDyPx = Number((-Math.cos(oppositeAzRad) * shadowReachPx).toFixed(1));
-  const shadowOpacity = Number(
-    (clamp((elev - 2) / 14, 0, 1) * 0.58).toFixed(2)
-  );
-  const headlampOpacity = Number(
-    clamp((2 - elev) / 8, 0, 1).toFixed(2)
-  );
+  const shadowOpacity = Number((clamp((elev - 2) / 14, 0, 1) * 0.58).toFixed(2));
+  const headlampOpacity = Number(clamp((2 - elev) / 8, 0, 1).toFixed(2));
+  const groundPoolOpacity = Number((headlampOpacity * 0.85).toFixed(2));
 
   return {
     darkness,
@@ -414,12 +445,12 @@ export function computeSolarAtmosphere(
     },
     sky: {
       'sky-color': skyColor,
-      'sky-horizon-blend': 0.55,
+      'sky-horizon-blend': 0.58,
       'horizon-color': horizonColor,
-      'horizon-fog-blend': 0.5,
+      'horizon-fog-blend': 0.52,
       'fog-color': fogColor,
-      'fog-ground-blend': mapStyle === 'DARK' ? 0.34 : 0.48,
-      'atmosphere-blend': 0.68,
+      'fog-ground-blend': 0.42,
+      'atmosphere-blend': 0.72,
     },
     fog: {
       color: fogColor,
@@ -437,8 +468,21 @@ export function computeSolarAtmosphere(
       color: tintColor,
       opacity: Number(tintOpacity.toFixed(3)),
     },
-    buildingColor,
-    buildingOpacity: Number(buildingOpacity.toFixed(2)),
+    dynamicVector: {
+      backgroundColor: lerpColor(s0.bgColor, s1.bgColor, localT),
+      landColor: lerpColor(s0.landColor, s1.landColor, localT),
+      parkColor: lerpColor(s0.parkColor, s1.parkColor, localT),
+      waterColor: lerpColor(s0.waterColor, s1.waterColor, localT),
+      majorRoadColor: lerpColor(s0.majorRoadColor, s1.majorRoadColor, localT),
+      minorRoadColor: lerpColor(s0.minorRoadColor, s1.minorRoadColor, localT),
+      labelColor: lerpColor(s0.labelColor, s1.labelColor, localT),
+      labelHaloColor: lerpColor(s0.labelHaloColor, s1.labelHaloColor, localT),
+      buildingBaseColor,
+      buildingMidColor,
+      buildingRoofColor,
+    },
+    buildingColor: buildingMidColor,
+    buildingOpacity,
     routeGlowOpacityBoost: Number(
       lerpNum(s0.glowBoost, s1.glowBoost, localT).toFixed(2)
     ),
@@ -447,6 +491,7 @@ export function computeSolarAtmosphere(
       shadowDyPx,
       shadowOpacity,
       headlampOpacity,
+      groundPoolOpacity,
     },
   };
 }
